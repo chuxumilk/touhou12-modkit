@@ -171,3 +171,26 @@ main { flex: 1; min-height: 0; display: flex; }
 }
 .lightbox img { max-width: 92vw; max-height: 92vh; image-rendering: pixelated;
   background: repeating-conic-gradient(#2a2f3d 0 25%, #232734 0 50%) 0 0/24px 24px; }
+
+/* 设置对话框 */
+#settings-modal { cursor: default; background: rgba(0,0,0,.6); }
+.modal {
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 12px;
+  padding: 20px 22px; width: min(620px, 92vw);
+  box-shadow: 0 16px 48px rgba(0,0,0,.5); cursor: default;
+}
+.modal h2 { margin-bottom: 6px; }
+.modal .hint { margin: 6px 0 14px; }
+.modal-row { display: flex; gap: 8px; }
+.modal-row input { flex: 1; font-family: Consolas, monospace; }
+.candidates { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.candidates .cand {
+  font-size: 12px; color: var(--accent2); cursor: pointer;
+  padding: 4px 8px; border-radius: 6px; background: var(--bg3);
+  word-break: break-all;
+}
+.candidates .cand:hover { background: var(--line); }
+.modal-actions {
+  display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px;
+}
+

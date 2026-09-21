@@ -76,6 +76,11 @@ $$("#tabs button").forEach((btn) => {
 /* ---------------- 初始化 ---------------- */
 async function boot() {
   const st = await api("/api/state");
+  $("#game-dir").textContent = st.game_dir || "";
+  if (!st.games || st.games.length === 0) {
+    openSettings(st.game_dir || "", true);
+    return;
+  }
   const sel = $("#game-select");
   sel.innerHTML = "";
   st.games.forEach((g) => {
@@ -99,12 +104,85 @@ async function boot() {
     await loadArchive();
     await loadMusiccmt();
   };
-  $("#game-dir").textContent = st.game_dir;
   updatePending(st.bgm);
   await loadArchive();
   await loadBgm();
   await loadMusiccmt();
 }
+
+/* ---------------- 设置游戏目录 / 启动游戏 ---------------- */
+function openSettings(currentDir, isFirst) {
+  const modal = $("#settings-modal");
+  $("#settings-path").value = currentDir || "";
+  modal.dataset.first = isFirst ? "1" : "";
+  modal.classList.remove("hidden");
+  loadCandidates();
+}
+
+function closeSettings() {
+  if ($("#settings-modal").dataset.first === "1") return;   // 首次必须设置
+  $("#settings-modal").classList.add("hidden");
+}
+
+async function loadCandidates() {
+  try {
+    const cfg = await api("/api/config");
+    const box = $("#settings-candidates");
+    box.innerHTML = "";
+    (cfg.candidates || []).forEach((p) => {
+      const div = document.createElement("div");
+      div.className = "cand";
+      div.textContent = p;
+      div.onclick = () => { $("#settings-path").value = p; };
+      box.appendChild(div);
+    });
+  } catch (e) { /* 忽略 */ }
+}
+
+$("#btn-settings").onclick = () => openSettings($("#game-dir").textContent);
+$("#settings-cancel").onclick = closeSettings;
+$("#settings-modal").onclick = closeSettings;
+
+$("#settings-browse").onclick = async () => {
+  toast("请在弹窗中选择游戏文件夹…");
+  try {
+    const res = await api("/api/pick-dir", { method: "POST" });
+    if (res.path) $("#settings-path").value = res.path;
+  } catch (ex) {
+    toast("打开选择框失败: " + ex.message, true);
+  }
+};
+
+$("#settings-apply").onclick = async () => {
+  const path = $("#settings-path").value.trim();
+  if (!path) { toast("请填写游戏目录", true); return; }
+  try {
+    await api("/api/config", {
+      method: "POST",
+      body: JSON.stringify({ game_dir: path }),
+    });
+    toast("游戏目录已切换");
+    $("#settings-modal").dataset.first = "";
+    $("#settings-modal").classList.add("hidden");
+    S.anmName = null; S.msgName = null; S.textures = [];
+    $("#texture-grid").innerHTML = "";
+    $("#msg-body").innerHTML = "";
+    $("#anm-list").innerHTML = "";
+    $("#msg-list").innerHTML = "";
+    await boot();
+  } catch (ex) {
+    toast("设置失败: " + ex.message, true);
+  }
+};
+
+$("#btn-launch").onclick = async () => {
+  try {
+    const res = await api(`/api/launch?game=${S.game}`, { method: "POST" });
+    toast("已启动 " + res.exe);
+  } catch (ex) {
+    toast("启动失败: " + ex.message, true);
+  }
+};
 
 function updatePending(bgminfo) {
   if (!bgminfo) return;

@@ -18,9 +18,29 @@
   <div class="game-switch">
     <label>游戏版本</label>
     <select id="game-select"></select>
+    <button id="btn-launch" class="primary" title="启动游戏">&#9654; 启动游戏</button>
+    <button id="btn-settings" title="设置游戏目录">&#9881; 设置目录</button>
     <span id="pending-badge" class="badge hidden"></span>
   </div>
 </header>
+
+<!-- 设置游戏目录 -->
+<div id="settings-modal" class="lightbox hidden">
+  <div class="modal" onclick="event.stopPropagation()">
+    <h2>设置游戏目录</h2>
+    <p class="hint">目录里需要有 <code>th12.dat</code>（日文版）或
+      <code>th12c.dat</code>（汉化版）；改音乐还需要 <code>thbgm.dat</code>。</p>
+    <div class="modal-row">
+      <input id="settings-path" type="text" placeholder="例如 D:\Games\th12">
+      <button id="settings-browse">浏览…</button>
+    </div>
+    <div id="settings-candidates" class="candidates"></div>
+    <div class="modal-actions">
+      <button id="settings-cancel">取消</button>
+      <button id="settings-apply" class="primary">应用</button>
+    </div>
+  </div>
+</div>
 
 <nav id="tabs">
   <button data-tab="texture" class="active">贴图</button>

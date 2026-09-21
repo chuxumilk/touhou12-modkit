@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -31,6 +32,7 @@ from thtk import anm, archive, bgm, crypto, msg  # noqa: E402
 
 WEB_DIR = os.path.join(HERE, "web")
 STAGING_DIR = os.path.join(HERE, "staging")
+CONFIG_PATH = os.path.join(HERE, "config.json")
 BACKUP_SUFFIX = ".modtool.bak"
 
 GAME_DIR = os.path.join(WS, "game",
@@ -53,10 +55,62 @@ BGM_DAT = os.path.join(GAME_DIR, "thbgm.dat")
 
 
 def set_game_dir(path):
-    """允许通过命令行切换游戏目录（便于测试/多份游戏）。"""
+    """切换游戏目录（便于测试/多份游戏）。"""
     global GAME_DIR, BGM_DAT
     GAME_DIR = os.path.abspath(path)
     BGM_DAT = os.path.join(GAME_DIR, "thbgm.dat")
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def check_game_dir(path):
+    """返回该目录里可用的版本列表；空列表表示不是 TH12 游戏目录。"""
+    found = []
+    for key, info in GAMES.items():
+        if os.path.isfile(os.path.join(path, info["dat"])):
+            found.append(key)
+    return found
+
+
+def find_candidates():
+    """在常见位置找有 th12.dat / th12c.dat 的目录。"""
+    roots = [
+        os.path.join(WS, "game"),
+        WS,
+        os.path.dirname(WS),
+        os.path.dirname(os.path.dirname(WS)),
+    ]
+    out = []
+    seen = set()
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        try:
+            names = os.listdir(root)
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(root, name)
+            if not os.path.isdir(path) or path in seen:
+                continue
+            if check_game_dir(path):
+                seen.add(path)
+                out.append(path)
+    return out
 
 
 # ----------------------------------------------------------------------
@@ -457,6 +511,87 @@ def get_musiccmt(key):
     return {"text": raw.decode(encoding, "replace"), "encoding": encoding}
 
 
+# ----------------------------------------------------------------------
+# 游戏目录 / 启动游戏
+# ----------------------------------------------------------------------
+def get_config():
+    games = STATE.available_games()
+    exes = {}
+    for key in games:
+        exe = os.path.join(GAME_DIR, "th12.exe" if key == "jp"
+                           else "th12c.exe")
+        exes[key] = os.path.basename(exe) if os.path.isfile(exe) else None
+    return {
+        "game_dir": GAME_DIR,
+        "games": [{"key": k, "label": GAMES[k]["label"]} for k in games],
+        "exes": exes,
+        "candidates": find_candidates(),
+    }
+
+
+def set_config(payload):
+    path = (payload.get("game_dir") or "").strip().strip('"')
+    if not path:
+        raise ApiError("请填写游戏目录")
+    if not os.path.isdir(path):
+        raise ApiError("目录不存在: %s" % path)
+    found = check_game_dir(path)
+    if not found:
+        raise ApiError("这个目录里没有 th12.dat 或 th12c.dat，"
+                       "不是 TH12 游戏目录")
+    with STATE.lock:
+        set_game_dir(path)
+        STATE.invalidate()
+        STATE.game_key = found[0]
+    cfg = load_config()
+    cfg["game_dir"] = GAME_DIR
+    save_config(cfg)
+    return get_config()
+
+
+def pick_directory():
+    """弹出一个 Windows 原生“选择文件夹”对话框。"""
+    code = (
+        "import tkinter as tk\n"
+        "from tkinter import filedialog\n"
+        "root = tk.Tk()\n"
+        "root.withdraw()\n"
+        "root.attributes('-topmost', True)\n"
+        "p = filedialog.askdirectory(title='选择 TH12 游戏目录')\n"
+        "print(p or '')\n"
+    )
+    try:
+        out = subprocess.run([sys.executable, "-c", code],
+                             capture_output=True, text=True, timeout=600)
+    except Exception as ex:
+        raise ApiError("无法打开文件夹选择框: %s" % ex)
+    path = (out.stdout or "").strip().splitlines()
+    path = path[-1].strip() if path else ""
+    return {"path": path}
+
+
+def launch_game(key=None):
+    games = STATE.available_games()
+    if not games:
+        raise ApiError("游戏目录里没有 th12.dat / th12c.dat")
+    if not key or key not in games:
+        key = STATE.game_key if STATE.game_key in games else games[0]
+    exe_name = "th12.exe" if key == "jp" else "th12c.exe"
+    exe = os.path.join(GAME_DIR, exe_name)
+    if not os.path.isfile(exe):
+        raise ApiError("找不到 %s（该目录里没有启动程序）" % exe_name)
+    try:
+        subprocess.Popen([exe], cwd=GAME_DIR, close_fds=True)
+    except Exception as ex:
+        raise ApiError("启动失败: %s" % ex)
+    with STATE.lock:
+        STATE.game_key = key
+    cfg = load_config()
+    cfg["last_game"] = key
+    save_config(cfg)
+    return {"ok": True, "exe": exe_name}
+
+
 def save_musiccmt(key, text):
     encoding = GAMES[key]["encoding"]
     data = text.encode(encoding, "replace")
@@ -570,7 +705,14 @@ class Handler(BaseHTTPRequestHandler):
         if route == "state":
             games = STATE.available_games()
             if not games:
-                raise ApiError("游戏目录里没有 th12.dat / th12c.dat")
+                return self._json({
+                    "games": [],
+                    "default_game": None,
+                    "game_dir": GAME_DIR,
+                    "need_config": True,
+                    "bgm": None,
+                    "backups": [],
+                })
             if STATE.game_key not in games:
                 STATE.game_key = games[0]
             return self._json({
@@ -615,6 +757,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(get_musiccmt(q.get("game", "jp")))
         if route == "backups":
             return self._json(list_backups())
+        if route == "config":
+            return self._json(get_config())
         raise ApiError("未知接口: %s" % route, 404)
 
     # ---- POST -----------------------------------------------------
@@ -652,6 +796,13 @@ class Handler(BaseHTTPRequestHandler):
                     q.get("game", "jp"), payload.get("text", "")))
             if route == "restore":
                 return self._json(restore_backup(q.get("key", "")))
+            if route == "config":
+                payload = json.loads(body.decode("utf-8") or "{}")
+                return self._json(set_config(payload))
+            if route == "pick-dir":
+                return self._json(pick_directory())
+            if route == "launch":
+                return self._json(launch_game(q.get("game")))
             raise ApiError("未知接口: %s" % route, 404)
         except ApiError as ex:
             self._error(str(ex), ex.code)
@@ -691,12 +842,21 @@ def main():
                     help="游戏目录（默认为 game/[th12] …）")
     args = ap.parse_args()
 
+    # 目录优先级：命令行 > config.json > 默认目录
+    cfg = load_config()
     if args.game_dir:
         set_game_dir(args.game_dir)
+    elif cfg.get("game_dir") and os.path.isdir(cfg["game_dir"]):
+        set_game_dir(cfg["game_dir"])
+    if cfg.get("last_game"):
+        STATE.game_key = cfg["last_game"]
 
     if not os.path.isdir(GAME_DIR):
         print("找不到游戏目录: %s" % GAME_DIR)
-        return 1
+        print("→ 服务仍会启动，请在网页右上角「设置目录」里指定。")
+    elif not check_game_dir(GAME_DIR):
+        print("警告: %s 里没有 th12.dat / th12c.dat" % GAME_DIR)
+        print("→ 请在网页右上角「设置目录」里改。")
 
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     httpd.daemon_threads = True
