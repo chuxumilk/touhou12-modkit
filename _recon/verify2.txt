@@ -1,0 +1,44 @@
+=== 1. header decryption ===
+  [PASS] magic == 'THA1'                                b'THA1'
+  [PASS] fields plausible                               list_size=4644 list_zsize=2345 count=180
+
+=== 2. archive parse ===
+  parsed 180 entries in 0.01s
+    format               THA1 (ZUN)
+    list_size            4644
+    list_zsize           2345
+    total_size           31320247
+    total_uncompressed   84001508
+    total_stored         31317886
+
+=== 3. entry table vs official thdat -l ===
+  official=180  mine=180
+  [PASS] all entries identical                          180/180 match
+
+=== 4. extracted bytes vs official thdat -x ===
+  [FAIL] all extracted files byte-identical             160 ok, 20 mismatched
+      enemy.anm mine=755112 ref=755836
+      pl02.anm mine=1903216 ref=1911508
+      st01_02b.msg mine=1445 ref=1440
+      stage02.anm mine=21426 ref=655956
+      stage02.ecl mine=58583 ref=79320
+      st02_01b.msg mine=1528 ref=1528
+      st02_02a.msg mine=1031 ref=1528
+      stage03.std mine=2746 ref=2744
+      st03_00b.msg mine=1129 ref=2384
+      st03_01a.msg mine=2420 ref=2420
+
+=== 5. lzss round-trip (synthetic) ===
+  [PASS] round-trip empty                               in=0 lzss=3
+  [PASS] round-trip one byte                            in=1 lzss=4
+  [PASS] round-trip repetitive                          in=2400 lzss=315
+  [PASS] round-trip zeros                               in=5000 lzss=629
+  [PASS] round-trip random 9KB                          in=9000 lzss=10127
+  [PASS] round-trip mixed                               in=1500 lzss=495
+  [PASS] round-trip 256 pattern                         in=10240 lzss=1539
+
+=== 6. lzss round-trip on real decrypted entries ===
+  (--slow mode; compressing large files in pure Python is slow)
+  [PASS] round-trip ascii.anm                           in=179084 lzss=40965 1.90s
+
+=== 7. archive rebuild round-trip (self-consistency) ===

@@ -1,0 +1,25 @@
+th12.dat size = 31320247 (0x1DDE8B7)
+
+=== raw first 16 bytes ===
+  13 5a b3 b1 f0 f1 54 d4 cb 02 9f a2 f4 df 5c 00
+
+=== after th_crypt(key=0x1b, step=0x37, block=16, limit=16) ===
+  54 48 41 31 39 df 5b 07 da 71 de 3a 08 08 18 08
+  magic = b'THA1'
+  magic == b'THA1' ? True
+
+=== decoded header fields (before constant subtraction) ===
+  size  = 123461433 (0x75BDF39)
+  zsize = 987656666 (0x3ADE71DA)
+  count = 135792648 (0x8180808)
+
+=== after subtracting constants ===
+  real size        = 4644 (0x1224)
+  real zsize       = 2345 (0x929)
+  real entry_count = 180
+
+=== consistency checks ===
+  entry table at file end? zsize < filesize : True (2345 < 31320247)
+  table starts at 0x1DDDF8E, file ends at 0x1DDE8B7
+  plausible entry count (1..5000) : True
+  plausible uncompressed table size: True

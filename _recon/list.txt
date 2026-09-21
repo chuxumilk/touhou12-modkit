@@ -1,0 +1,11 @@
+raw len=5006 rc=0
+first 64 bytes hex: 5b746831325d20b6abb7bdd0c7c1abb4ac2028bababbafb0e62bc8d5cec4b0e6295c637573746f6d2e6578650d0a5b746831325d20b6abb7bdd0c7c1abb4ac20
+[gbk] entries=71
+    '[th12] 东方星莲船 (汉化版+日文版)\\custom.exe'
+    '[th12] 东方星莲船 (汉化版+日文版)\\custom_cn.exe'
+    '[th12] 东方星莲船 (汉化版+日文版)\\th12.dat'
+    '[th12] 东方星莲船 (汉化版+日文版)\\th12.exe'
+    exists(gbk)=False
+    exists(gbk)=False
+    exists(gbk)=False
+    exists(gbk)=False

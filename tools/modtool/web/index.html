@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>东方星莲船 魔改工具</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo">&#127789;</span>
+    <div>
+      <h1>东方星莲船 <small>魔改工具</small></h1>
+      <p id="game-dir" class="muted"></p>
+    </div>
+  </div>
+  <div class="game-switch">
+    <label>游戏版本</label>
+    <select id="game-select"></select>
+    <span id="pending-badge" class="badge hidden"></span>
+  </div>
+</header>
+
+<nav id="tabs">
+  <button data-tab="texture" class="active">贴图</button>
+  <button data-tab="bgm">音乐</button>
+  <button data-tab="dialogue">对话</button>
+  <button data-tab="files">任意文件</button>
+  <button data-tab="musiccmt">音乐室评论</button>
+  <button data-tab="backup">备份 / 还原</button>
+</nav>
+
+<main>
+  <!-- ======================= 贴图 ======================= -->
+  <section id="tab-texture" class="tab active">
+    <aside class="side">
+      <div class="side-head">
+        <input id="anm-filter" type="text" placeholder="筛选 .anm …">
+      </div>
+      <ul id="anm-list" class="list"></ul>
+    </aside>
+    <div class="content">
+      <div class="content-head">
+        <h2 id="texture-title">请选择左侧的贴图文件</h2>
+        <span id="texture-count" class="muted"></span>
+      </div>
+      <div id="texture-grid" class="grid"></div>
+    </div>
+  </section>
+
+  <!-- ======================= 音乐 ======================= -->
+  <section id="tab-bgm" class="tab">
+    <div class="content wide">
+      <div class="content-head">
+        <h2>BGM 曲目</h2>
+        <div class="actions">
+          <button id="bgm-apply" class="primary" disabled>应用修改到游戏</button>
+          <button id="bgm-cancel" disabled>放弃修改</button>
+        </div>
+      </div>
+      <p class="hint">替换曲目：上传 WAV（自动转成 16bit / 立体声 / 44100Hz）。
+        循环点 = 曲目内循环回到的位置（秒），0 表示从头循环。
+        修改先暂存，点“应用修改”才会重建 400MB 的 thbgm.dat。</p>
+      <div id="bgm-progress" class="progress hidden"><div></div></div>
+      <table class="table" id="bgm-table">
+        <thead>
+          <tr><th>#</th><th>曲目</th><th>时长</th><th>循环点</th>
+              <th>状态</th><th>试听</th><th>操作</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ======================= 对话 ======================= -->
+  <section id="tab-dialogue" class="tab">
+    <aside class="side">
+      <div class="side-head">
+        <input id="msg-filter" type="text" placeholder="筛选 .msg …">
+      </div>
+      <ul id="msg-list" class="list"></ul>
+    </aside>
+    <div class="content">
+      <div class="content-head">
+        <h2 id="msg-title">请选择左侧的对话文件</h2>
+        <div class="actions">
+          <span id="msg-encoding" class="muted"></span>
+          <button id="msg-save" class="primary" disabled>保存对话</button>
+        </div>
+      </div>
+      <div id="msg-body" class="msg-body"></div>
+    </div>
+  </section>
+
+  <!-- ======================= 任意文件 ======================= -->
+  <section id="tab-files" class="tab">
+    <div class="content wide">
+      <div class="content-head">
+        <h2>归档文件</h2>
+        <input id="file-filter" type="text" placeholder="筛选文件名…">
+      </div>
+      <p class="hint">可以把任意文件（.ecl 弹幕脚本、.sht 自机、.std 关卡、.rpy 录像等）
+        导出备份或原样替换回去。替换前会自动备份原 .dat。</p>
+      <table class="table" id="file-table">
+        <thead>
+          <tr><th>文件名</th><th>类型</th><th>原始大小</th><th>存储大小</th><th>操作</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ======================= 音乐室评论 ======================= -->
+  <section id="tab-musiccmt" class="tab">
+    <div class="content wide">
+      <div class="content-head">
+        <h2>musiccmt.txt（音乐室曲目评论）</h2>
+        <button id="musiccmt-save" class="primary">保存</button>
+      </div>
+      <p class="hint">格式：<code>@bgm/曲目名</code> 下一行是评论文字。
+        汉化版按 GBK 保存，日文版按 Shift-JIS 保存。</p>
+      <textarea id="musiccmt-text" spellcheck="false"></textarea>
+    </div>
+  </section>
+
+  <!-- ======================= 备份 ======================= -->
+  <section id="tab-backup" class="tab">
+    <div class="content wide">
+      <div class="content-head">
+        <h2>备份 / 还原</h2>
+        <button id="backup-refresh">刷新</button>
+      </div>
+      <p class="hint">工具在第一次修改某个文件前会自动生成
+        <code>*.modtool.bak</code>（保留最原始的版本）。点“还原”会把备份写回游戏。</p>
+      <table class="table" id="backup-table">
+        <thead><tr><th>文件</th><th>大小</th><th>备份时间</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<div id="lightbox" class="lightbox hidden"><img id="lightbox-img" alt=""></div>
+<input id="hidden-file" type="file" class="hidden">
+
+<script src="/app.js"></script>
+</body>
+</html>

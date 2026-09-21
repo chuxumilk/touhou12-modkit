@@ -1,0 +1,21 @@
+# ===== 游戏本体与数据（体积大，不入库）=====
+game/
+
+# ===== 逆向调研中的第三方源码 / 构建产物 / 解包结果 =====
+_recon/build-thtk/
+_recon/build-static/
+_recon/src/
+_recon/x_official/
+_recon/x_official_cn/
+_recon/testgame/
+
+# ===== 运行时产物 =====
+tools/modtool/staging/
+__pycache__/
+*.py[cod]
+
+# ===== 备份 / 临时文件 =====
+*.modtool.bak
+*.bak
+*.tmp
+*.new

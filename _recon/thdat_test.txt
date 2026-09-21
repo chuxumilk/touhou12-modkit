@@ -1,0 +1,38 @@
+﻿=== thdat -l th12.dat (auto-detect) ===
+Usage: thdat.exe [-Vg] [-C DIR] [[-c | -l | -x] VERSION] [ARCHIVE [FILE...]]
+Options:
+  -c  create an archive
+  -l  list the contents of an archive
+  -x  extract an archive
+  -V  display version information and exit
+  -g  enable glob matching for -x filenames
+  -C  change directory after opening the archive
+VERSION can be:
+  1, 2, 3, 4, 5, 6, 7, 75, 8, 9, 95, 10, 103 (for Uwabami Breakers), 105, 11, 12, 123, 125, 128, 13, 14, 143, 15, 16, 165, 17, 18, 185, 19, or 20
+Specify 'd' as VERSION to automatically detect archive format. (-l and -x only)
+
+Report bugs to <https://github.com/thpatch/thtk/issues>.
+
+rc=1
+
+=== thdat -l -V 12 th12.dat ===
+thdat.exe : thdat.exe:thtk_io_open_file: error while opening file `12': No such file or directory
+At line:10 char:10
++ $log += (& $thdat -l -V 12 $dat 2>&1 | Out-String)
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (thdat.exe:thtk_...le or directory:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+rc=1
+
+=== thdat -l -V 7 th12.dat (sanity: force th07) ===
+thdat.exe : thdat.exe:thtk_io_open_file: error while opening file `7': No such file or directory
+At line:14 char:10
++ $log += (& $thdat -l -V 7 $dat 2>&1 | Out-String)
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (thdat.exe:thtk_...le or directory:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+rc=1

@@ -1,0 +1,173 @@
+:root {
+  --bg: #14161c;
+  --bg2: #1b1e27;
+  --bg3: #232734;
+  --line: #2f3547;
+  --fg: #e8ecf5;
+  --muted: #8a93a8;
+  --accent: #ff5d73;
+  --accent2: #5aa9ff;
+  --ok: #4cd07d;
+  --warn: #ffb454;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 14px/1.6 "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  display: flex; flex-direction: column;
+}
+h1, h2 { margin: 0; font-weight: 600; }
+h1 { font-size: 19px; }
+h1 small { color: var(--accent); font-size: 12px; margin-left: 6px; }
+h2 { font-size: 16px; }
+.muted { color: var(--muted); font-size: 12px; margin: 2px 0 0; }
+.hidden { display: none !important; }
+
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 18px; background: var(--bg2);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.logo { font-size: 28px; }
+.game-switch { display: flex; align-items: center; gap: 8px; }
+.game-switch label { color: var(--muted); font-size: 12px; }
+select, input[type=text], input[type=number], textarea {
+  background: var(--bg3); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 8px; font: inherit; outline: none;
+}
+select:focus, input:focus, textarea:focus { border-color: var(--accent2); }
+button {
+  background: var(--bg3); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit;
+  transition: .15s;
+}
+button:hover { border-color: var(--accent2); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:disabled { opacity: .4; cursor: not-allowed; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.mini { padding: 3px 8px; font-size: 12px; }
+.badge {
+  background: var(--warn); color: #201400; border-radius: 10px;
+  padding: 1px 9px; font-size: 12px; font-weight: 600;
+}
+
+nav#tabs {
+  display: flex; gap: 4px; padding: 8px 14px 0;
+  background: var(--bg2); border-bottom: 1px solid var(--line);
+}
+nav#tabs button {
+  border: none; background: transparent; border-radius: 6px 6px 0 0;
+  color: var(--muted); padding: 8px 16px;
+}
+nav#tabs button.active { background: var(--bg); color: var(--fg); }
+
+main { flex: 1; min-height: 0; display: flex; }
+.tab { display: none; flex: 1; min-height: 0; }
+.tab.active { display: flex; }
+.side {
+  width: 260px; min-width: 200px; border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; min-height: 0; background: var(--bg2);
+}
+.side-head { padding: 10px; border-bottom: 1px solid var(--line); }
+.side-head input { width: 100%; }
+.list { list-style: none; margin: 0; padding: 6px; overflow: auto; flex: 1; }
+.list li {
+  padding: 6px 9px; border-radius: 6px; cursor: pointer;
+  display: flex; justify-content: space-between; gap: 6px;
+  font-size: 13px;
+}
+.list li:hover { background: var(--bg3); }
+.list li.active { background: var(--accent); color: #fff; }
+.list li span.size { color: var(--muted); font-size: 11px; }
+.list li.active span.size { color: #ffd7dd; }
+
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.content.wide { width: 100%; }
+.content-head {
+  display: flex; align-items: center; gap: 12px; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap;
+}
+.actions { display: flex; gap: 8px; align-items: center; }
+.hint { color: var(--muted); font-size: 12px; margin: 8px 16px 0; }
+.hint code, code { background: var(--bg3); padding: 1px 5px; border-radius: 4px; }
+
+.grid {
+  display: grid; gap: 12px; padding: 16px; overflow: auto;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  align-content: start;
+}
+.card {
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px; display: flex; flex-direction: column; gap: 6px;
+}
+.card .thumb {
+  height: 130px; background:
+    repeating-conic-gradient(#2a2f3d 0 25%, #232734 0 50%) 0 0/16px 16px;
+  border-radius: 6px; display: flex; align-items: center; justify-content: center;
+  overflow: hidden; cursor: zoom-in;
+}
+.card .thumb img { max-width: 100%; max-height: 100%; image-rendering: pixelated; }
+.card .name { font-size: 12px; word-break: break-all; }
+.card .meta { font-size: 11px; color: var(--muted); }
+.card .btns { display: flex; gap: 6px; }
+
+.table { width: 100%; border-collapse: collapse; overflow: auto; display: block; }
+.table thead th {
+  position: sticky; top: 0; background: var(--bg2); text-align: left;
+  padding: 8px 12px; border-bottom: 1px solid var(--line);
+  color: var(--muted); font-weight: 500; font-size: 12px;
+}
+.table td { padding: 7px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.table tr:hover td { background: var(--bg2); }
+.table audio { height: 30px; }
+.row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill {
+  display: inline-block; padding: 1px 8px; border-radius: 10px;
+  font-size: 11px; background: var(--bg3); color: var(--muted);
+}
+.pill.ok { background: rgba(76,208,125,.18); color: var(--ok); }
+.pill.warn { background: rgba(255,180,84,.18); color: var(--warn); }
+
+.msg-body { overflow: auto; padding: 12px 16px; }
+.msg-entry {
+  border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px;
+  background: var(--bg2);
+}
+.msg-entry > header {
+  padding: 6px 12px; border-bottom: 1px solid var(--line);
+  font-size: 12px; color: var(--muted); display: flex; gap: 10px;
+}
+.msg-entry .lines { padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
+.msg-entry textarea {
+  width: 100%; min-height: 34px; resize: vertical; font-size: 13px;
+}
+.msg-ops { display: flex; flex-wrap: wrap; gap: 5px; padding: 4px 12px 10px; }
+.msg-ops .pill { cursor: default; }
+.msg-ops .pill.text { background: rgba(90,169,255,.15); color: var(--accent2); }
+
+#musiccmt-text {
+  flex: 1; margin: 12px 16px 16px; min-height: 300px; resize: none;
+  font-family: Consolas, "Courier New", monospace; line-height: 1.7;
+}
+
+.progress { height: 6px; background: var(--bg3); margin: 8px 16px; border-radius: 3px; overflow: hidden; }
+.progress > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  background: var(--bg3); border: 1px solid var(--line); border-left: 3px solid var(--ok);
+  padding: 10px 18px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  max-width: 70vw; z-index: 50;
+}
+.toast.error { border-left-color: var(--accent); }
+
+.lightbox {
+  position: fixed; inset: 0; background: rgba(0,0,0,.85);
+  display: flex; align-items: center; justify-content: center; z-index: 60;
+  cursor: zoom-out;
+}
+.lightbox img { max-width: 92vw; max-height: 92vh; image-rendering: pixelated;
+  background: repeating-conic-gradient(#2a2f3d 0 25%, #232734 0 50%) 0 0/24px 24px; }

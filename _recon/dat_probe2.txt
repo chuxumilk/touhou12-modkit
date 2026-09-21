@@ -1,0 +1,62 @@
+size = 31320247 (0x1DDE8B7)
+
+=== entropy by 64KB window (encrypted/compressed ~8.0, plaintext lower) ===
+  0x00000000  7.9828
+  0x00010000  7.8909
+  0x00020000  7.9013
+  0x00030000  7.8809
+  0x00040000  7.9360
+  0x00050000  7.9533
+  0x00060000  7.8395
+  0x00070000  7.8809
+  ...
+  0x01DA0000  7.3786
+  0x01DB0000  7.4254
+  0x01DC0000  7.7503
+  0x01DD0000  7.2343
+  whole-file entropy = 7.9661
+  count of 0x00 bytes = 242120 (0.773%)
+
+=== plaintext-ish strings (>=6 printable ASCII) in first 4MB ===
+  0x00000332  b"XU'\\a&"
+  0x000003CE  b'ABGD.U'
+  0x00000855  b'e:x$nE'
+  0x00000929  b'|@ev{$'
+  0x00000C6C  b'IB@tQx'
+  0x0000132D  b'Gzo%n6'
+  0x00001AB9  b' #w0_m'
+  0x00001E46  b"FXdr'EF"
+  0x00001EBF  b'lJ6\\JwS'
+  0x000020F5  b'Sp$H;9v`'
+  0x00002200  b'0Yw?[n8Z'
+  0x0000242F  b'PF2cwX'
+  0x00002779  b'jV=y?4'
+  0x0000293A  b'+rFk>f'
+  0x00002B2C  b'1a6;WC'
+  0x000033A6  b'OP}<"!!'
+  0x00003510  b'"~ONAl:zjY'
+  0x000036CD  b'ri h+D5'
+  0x00003850  b'}(JM#pD.'
+  0x00003997  b'o6F<\\,PjS'
+  0x000039D5  b's1rgMV'
+  0x00003A88  b'~xJZ0['
+  0x00003C93  b' \\I+.%n'
+  0x00004544  b"'P%O$'"
+  0x00004976  b"+>ApP'"
+  0x00004A15  b'>x*9@)5'
+
+=== hypothesis: PBGZ (th08) ===
+  first4 = b'\x13Z\xb3\xb1'  -> NO MATCH
+
+=== hypothesis: th06/th07 container (count,offset,size u32 LE) ===
+  count=2981321235 offset=3562336752 size=2728329931
+  offset < filesize? False ; size < filesize? False
+
+=== hypothesis: th105 (u16 count, u32 hdrsize) ===
+  count=23059 hdrsize=4059083187 (filesize=31320247) -> IMPLAUSIBLE
+
+=== search 'edz' / 'PBGZ' / 123456-consts in th12.exe ===
+  b'edz'   found at []
+  b'PBGZ'  found at []
+  b'ZGBP'  found at []
+  b'thbgm' found at ['0x9F7B6', '0x9F7E8']
