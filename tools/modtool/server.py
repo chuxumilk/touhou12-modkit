@@ -116,21 +116,31 @@ class State(object):
         self.bgm_replaced = set()
         self.jobs = {}
         self.job_seq = 0
+        self.game_key = "jp"
         if not os.path.isdir(STAGING_DIR):
             os.makedirs(STAGING_DIR)
 
     # -- 归档 --------------------------------------------------------
+    def dat_path(self, key):
+        return os.path.join(GAME_DIR, GAMES[key]["dat"])
+
+    def available_games(self):
+        """只返回实际存在 .dat 的版本（兼容只有单版本的游戏目录）。"""
+        return [k for k in GAMES if os.path.isfile(self.dat_path(k))]
+
     def archive(self, key):
         if key not in GAMES:
             raise ApiError("未知游戏版本: %s" % key)
         with self.lock:
             if key not in self.archives:
-                path = os.path.join(GAME_DIR, GAMES[key]["dat"])
+                path = self.dat_path(key)
+                if not os.path.isfile(path):
+                    raise ApiError("找不到 %s（该游戏目录没有此版本）" % path, 404)
                 self.archives[key] = archive.Archive.from_file(path)
             return self.archives[key]
 
     def archive_path(self, key):
-        return os.path.join(GAME_DIR, GAMES[key]["dat"])
+        return self.dat_path(key)
 
     def anm(self, key, name):
         """带缓存的 ANM 解析。"""
@@ -150,7 +160,10 @@ class State(object):
     # -- BGM ---------------------------------------------------------
     def bgm_fmt(self):
         if self.fmt is None:
-            data = self.archive("jp").read_by_name("thbgm.fmt")
+            games = self.available_games()
+            if not games:
+                raise ApiError("游戏目录里没有 th12.dat / th12c.dat")
+            data = self.archive(games[0]).read_by_name("thbgm.fmt")
             self.fmt = bgm.BgmFmt.from_bytes(data)
         return self.fmt
 
@@ -343,7 +356,7 @@ def _apply_bgm(job):
     job["message"] = "正在更新 thbgm.fmt…"
     job["progress"] = 1.0
     new_archives = {}
-    for key in GAMES:
+    for key in STATE.available_games():
         a = STATE.archive(key)
         idx = a.index_of("thbgm.fmt")
         blob = a.to_bytes_patched({idx: fmt_bytes})
@@ -354,7 +367,7 @@ def _apply_bgm(job):
     # 4) 备份 + 原子替换
     job["message"] = "正在备份原文件…"
     ensure_backup(BGM_DAT)
-    for key in GAMES:
+    for key in STATE.available_games():
         ensure_backup(STATE.archive_path(key))
     job["message"] = "正在写入…"
     os.replace(new_dat, BGM_DAT)
@@ -555,9 +568,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_get(self, route, q):
         if route == "state":
+            games = STATE.available_games()
+            if not games:
+                raise ApiError("游戏目录里没有 th12.dat / th12c.dat")
+            if STATE.game_key not in games:
+                STATE.game_key = games[0]
             return self._json({
-                "games": [{"key": k, "label": v["label"]}
-                          for k, v in GAMES.items()],
+                "games": [{"key": k, "label": GAMES[k]["label"]}
+                          for k in games],
+                "default_game": STATE.game_key,
                 "game_dir": GAME_DIR,
                 "bgm": list_bgm(),
                 "backups": list_backups()["backups"],

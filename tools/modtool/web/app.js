@@ -84,6 +84,7 @@ async function boot() {
     opt.textContent = g.label;
     sel.appendChild(opt);
   });
+  S.game = st.default_game || st.games[0].key;
   sel.value = S.game;
   sel.onchange = async () => {
     S.game = sel.value;
