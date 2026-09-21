@@ -204,6 +204,7 @@ async function loadArchive() {
   S.entries = data.entries;
   renderAnmList();
   renderFileTable();
+  renderMsgList();
 }
 
 function renderAnmList() {
