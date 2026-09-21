@@ -48,6 +48,7 @@
   <button data-tab="dialogue">对话</button>
   <button data-tab="files">任意文件</button>
   <button data-tab="musiccmt">音乐室评论</button>
+  <button data-tab="log">日志</button>
   <button data-tab="backup">备份 / 还原</button>
 </nav>
 
@@ -105,7 +106,9 @@
       <div class="content-head">
         <h2 id="msg-title">请选择左侧的对话文件</h2>
         <div class="actions">
-          <span id="msg-encoding" class="muted"></span>
+          <span id="msg-info" class="muted"></span>
+          <button id="msg-export" disabled>导出文档</button>
+          <button id="msg-import" disabled>导入文档</button>
           <button id="msg-save" class="primary" disabled>保存对话</button>
         </div>
       </div>
@@ -141,6 +144,26 @@
       <p class="hint">格式：<code>@bgm/曲目名</code> 下一行是评论文字。
         汉化版按 GBK 保存，日文版按 Shift-JIS 保存。</p>
       <textarea id="musiccmt-text" spellcheck="false"></textarea>
+    </div>
+  </section>
+
+  <!-- ======================= 日志 ======================= -->
+  <section id="tab-log" class="tab">
+    <div class="content wide">
+      <div class="content-head">
+        <h2>操作日志</h2>
+        <div class="actions">
+          <button id="log-refresh">刷新</button>
+          <button id="log-download">导出日志文件</button>
+          <button id="log-clear">清空</button>
+        </div>
+      </div>
+      <p class="hint">记录所有写操作（替换贴图 / 保存对话 / 重建音乐 / 还原备份…），
+        同时保存在 <code>tools/modtool/logs/modtool.log</code>（JSON Lines）。</p>
+      <table class="table" id="log-table">
+        <thead><tr><th>时间</th><th>操作</th><th>对象</th><th>详情</th></tr></thead>
+        <tbody></tbody>
+      </table>
     </div>
   </section>
 

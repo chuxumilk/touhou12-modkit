@@ -22,6 +22,8 @@ TH10 以后（含 TH12）的 .msg 沿用 TH06 的**指令流**结构：
 （汉化版是 GBK）。字符串按 4 字节对齐补零。
 """
 
+import os
+import re
 import struct
 
 #: 文本指令的 type
@@ -31,9 +33,93 @@ TEXT_XOR_KEY = 0x77
 TEXT_XOR_STEP1 = 7
 TEXT_XOR_STEP2 = 16
 
+#: 说话人切换指令（对应 th11/th12 的 msg 指令表）
+SPEAKER_PLAYER = 7     # 自机说话
+SPEAKER_BOSS = 8       # 敌机（Boss）说话
+SPEAKER_NONE = 9       # 旁白（无立绘）
+#: 立绘表情指令
+FACE_PLAYER = 13
+FACE_BOSS = 14
+
+#: 指令名称表（th11 地图 + th12 新增，用于界面提示）
+INSTR_NAMES = {
+    0: "end", 1: "playerShow", 2: "bossShow", 3: "textboxShow",
+    4: "playerHide", 5: "bossHide", 6: "textboxHide",
+    7: "speakerPlayer", 8: "speakerBoss", 9: "speakerNone",
+    10: "skippable", 11: "textPause", 12: "eclResume",
+    13: "playerFace", 14: "bossFace", 15: "textLine1", 16: "textLine2",
+    17: "textAdd", 18: "textClear", 19: "musicBoss", 20: "intro",
+    21: "stageEnd", 22: "musicEnd", 23: "playerShake", 24: "bossShake",
+    25: "textOffsetY", 26: "flag2", 27: "musicFade", 28: "bubblePos",
+    29: "bubbleType", 30: "routeSelect", 33: "portraitDarken",
+    34: "portraitHighlight", 35: "lightsOut",
+}
+
+#: 说话人显示名
+SPEAKER_LABELS = {
+    "player": "自机",
+    "boss": "敌机",
+    "none": "旁白",
+}
+
+#: 可玩角色（对话文件名的中间两位数字）
+PLAYER_CHARS = {
+    "00": "博丽灵梦",
+    "01": "雾雨魔理沙",
+    "02": "东风谷早苗",
+}
+
+#: 关卡 Boss（用于把「敌机」显示成具体名字）
+STAGE_BOSS = {
+    "st01": "娜兹琳",
+    "st02": "多多良小伞",
+    "st03": "云居一轮",
+    "st04": "村纱水蜜",
+    "st05": "寅丸星",
+    "st06": "圣白莲",
+    "st07": "封兽鵺",
+}
+
 
 class MsgError(Exception):
     """对话文件结构不正确。"""
+
+
+def describe_file(filename):
+    """从对话文件名推断 角色 / 关卡 / 场景。
+
+    ``st03_00a.msg`` -> 关卡 st03、角色 博丽灵梦、场景 中Boss战
+    ``st03_01b.msg`` -> 关卡 st03、角色 雾雨魔理沙、场景 Boss战
+    """
+    info = {"stage": None, "boss": None, "player": None, "scene": None}
+    base = os.path.basename(filename)
+    if "." in base:
+        base = base.rsplit(".", 1)[0]
+    base = base.lower()
+    m = re.match(r"^(st\d\d|ex\d\d?)_(\d\d)([ab])$", base)
+    if not m:
+        if re.match(r"^e\d\d$", base):
+            info["scene"] = "结局对话"
+        elif base.startswith("staff"):
+            info["scene"] = "制作人员"
+        return info
+    stage, char_id, scene = m.group(1), m.group(2), m.group(3)
+    info["stage"] = stage
+    info["boss"] = STAGE_BOSS.get(stage)
+    info["player"] = PLAYER_CHARS.get(char_id)
+    info["scene"] = "中Boss战" if scene == "a" else "Boss战"
+    return info
+
+
+def check_encoding(text, encoding):
+    """返回无法用 ``encoding`` 表示的字符列表。"""
+    bad = []
+    for ch in text:
+        try:
+            ch.encode(encoding)
+        except UnicodeEncodeError:
+            bad.append(ch)
+    return bad
 
 
 def rolling_xor(data, key=TEXT_XOR_KEY, step1=TEXT_XOR_STEP1,
@@ -102,6 +188,25 @@ class Entry(object):
 
     def texts(self):
         return [i for i in self.instructions if i.is_text]
+
+    def lines(self, encoding="cp932"):
+        """返回 ``[(指令下标, 说话人, 文本)]``。
+
+        说话人按最近的 ``7/8/9`` 指令跟踪：
+        ``player``（自机）/ ``boss``（敌机）/ ``none``（旁白）/ ``None``（未指定）。
+        """
+        out = []
+        speaker = None
+        for j, ins in enumerate(self.instructions):
+            if ins.type == SPEAKER_PLAYER:
+                speaker = "player"
+            elif ins.type == SPEAKER_BOSS:
+                speaker = "boss"
+            elif ins.type == SPEAKER_NONE:
+                speaker = "none"
+            elif ins.is_text:
+                out.append((j, speaker, ins.text(encoding)))
+        return out
 
     def __repr__(self):
         return "<Entry extra=%d instrs=%d>" % (
@@ -200,7 +305,6 @@ def _cjk_ratio(s):
     cjk = sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff")
     return cjk / float(len(s))
 
-
 def _bad_ratio(s):
     if not s:
         return 0.0
@@ -222,3 +326,84 @@ def guess_encoding(data):
         if best is None or score > best[0]:
             best = (score, enc)
     return best[1] if best else "cp932"
+
+
+# ----------------------------------------------------------------------
+# 对话文档（导出 / 导入）
+# ----------------------------------------------------------------------
+#: 文档里每行的格式：  [条目号.指令号] [说话人] 文本
+DOC_LINE_RE = re.compile(
+    r"^\s*\[(\d+)\.(\d+)\]\s*(?:\[(自机|敌机|旁白)\])?\s?(.*)$")
+
+
+def export_document(msgfile, filename, encoding=None):
+    """把对话导出成可编辑的文本（UTF-8），供翻译/校对使用。"""
+    encoding = encoding or msgfile.encoding
+    info = describe_file(filename)
+    head = []
+    head.append("# 东方星莲船 对话文档")
+    head.append("# 文件: %s" % filename)
+    meta = []
+    if info["player"]:
+        meta.append("角色: %s" % info["player"])
+    if info["stage"]:
+        meta.append("关卡: %s" % info["stage"])
+    if info["boss"]:
+        meta.append("Boss: %s" % info["boss"])
+    if info["scene"]:
+        meta.append("场景: %s" % info["scene"])
+    head.append("# " + "    ".join(meta) if meta else "#")
+    head.append("# 编码: %s" % encoding)
+    head.append("#")
+    head.append("# 修改方法：只改每行 [条目.指令] 后面的文字，"
+                "保存后用工具的「导入文档」写回。")
+    head.append("# 行首的 [自机]/[敌机]/[旁白] 只是提示，删掉也不影响导入。")
+    head.append("# " + "=" * 58)
+
+    lines = list(head)
+    for ei, entry in enumerate(msgfile.entries):
+        lines.append("")
+        lines.append("# ---- 条目 %d (id=%d) ----" % (ei, entry.extra))
+        for ji, speaker, text in entry.lines(encoding):
+            tag = SPEAKER_LABELS.get(speaker, "")
+            lines.append("[%d.%d] [%s] %s" % (ei, ji, tag, text))
+    return "\n".join(lines) + "\n"
+
+
+def import_document(text, msgfile, encoding=None):
+    """把编辑过的文档写回 ``msgfile``。
+
+    返回 ``(修改条数, 未匹配行列表, 无法编码的字符列表)``。
+    """
+    encoding = encoding or msgfile.encoding
+    changed = 0
+    unmatched = []
+    bad_chars = []
+    for raw in text.splitlines():
+        line = raw.rstrip("\r\n")
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = DOC_LINE_RE.match(line)
+        if not m:
+            unmatched.append(line)
+            continue
+        ei, ji = int(m.group(1)), int(m.group(2))
+        new_text = m.group(4)
+        if ei >= len(msgfile.entries):
+            unmatched.append(line)
+            continue
+        entry = msgfile.entries[ei]
+        if ji >= len(entry.instructions):
+            unmatched.append(line)
+            continue
+        ins = entry.instructions[ji]
+        if not ins.is_text:
+            unmatched.append(line)
+            continue
+        if ins.text(encoding) != new_text:
+            for ch in check_encoding(new_text, encoding):
+                if ch not in bad_chars:
+                    bad_chars.append(ch)
+            ins.set_text(new_text, encoding)
+            changed += 1
+    return changed, unmatched, bad_chars

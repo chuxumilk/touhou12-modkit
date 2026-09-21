@@ -11,6 +11,7 @@ _recon/testgame/
 
 # ===== 运行时产物 =====
 tools/modtool/staging/
+tools/modtool/logs/
 tools/modtool/config.json
 __pycache__/
 *.py[cod]

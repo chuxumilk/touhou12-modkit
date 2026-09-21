@@ -70,6 +70,7 @@ $$("#tabs button").forEach((btn) => {
     btn.classList.add("active");
     $("#tab-" + btn.dataset.tab).classList.add("active");
     if (btn.dataset.tab === "backup") loadBackups();
+    if (btn.dataset.tab === "log") loadLogs();
   };
 });
 
@@ -443,9 +444,17 @@ async function openMsg(name, li) {
     const data = await api(
       `/api/msg?game=${S.game}&name=${encodeURIComponent(name)}`);
     S.msgData = data;
-    $("#msg-encoding").textContent = "编码: " + data.encoding;
+    const info = [];
+    if (data.player) info.push("角色: " + data.player);
+    if (data.stage) info.push("关卡: " + data.stage);
+    if (data.boss) info.push("Boss: " + data.boss);
+    if (data.scene) info.push(data.scene);
+    info.push("编码: " + data.encoding);
+    $("#msg-info").textContent = info.join(" · ");
     renderMsg();
     $("#msg-save").disabled = false;
+    $("#msg-export").disabled = false;
+    $("#msg-import").disabled = false;
   } catch (ex) {
     $("#msg-body").innerHTML = "";
     toast("解析失败: " + ex.message, true);
@@ -467,16 +476,24 @@ function renderMsg() {
     ops.className = "msg-ops";
     entry.instructions.forEach((ins) => {
       if (ins.text !== undefined) {
+        const row = document.createElement("div");
+        row.className = "msg-line";
+        const tag = document.createElement("span");
+        tag.className = "speaker speaker-" + (ins.speaker || "unknown");
+        tag.textContent = ins.speaker_label || "？";
+        tag.title = "指令 " + ins.index + " · " + ins.name;
         const ta = document.createElement("textarea");
         ta.value = ins.text;
         ta.dataset.entry = entry.index;
         ta.dataset.instr = ins.index;
-        lines.appendChild(ta);
+        row.appendChild(tag);
+        row.appendChild(ta);
+        lines.appendChild(row);
       } else {
         const span = document.createElement("span");
         span.className = "pill";
-        span.textContent = `type ${ins.type}`;
-        span.title = `time=${ins.time} length=${ins.length}`;
+        span.textContent = ins.name || ("type " + ins.type);
+        span.title = `type=${ins.type} time=${ins.time} length=${ins.length}`;
         ops.appendChild(span);
       }
     });
@@ -485,6 +502,43 @@ function renderMsg() {
     body.appendChild(div);
   });
 }
+
+$("#msg-export").onclick = () => {
+  if (!S.msgName) return;
+  const a = document.createElement("a");
+  a.href = `/api/msg.doc?game=${S.game}` +
+    `&name=${encodeURIComponent(S.msgName)}`;
+  a.download = S.msgName.replace(/\.msg$/i, "") + ".txt";
+  a.click();
+  toast("已导出对话文档，可用任意文本编辑器翻译后再导入");
+};
+
+$("#msg-import").onclick = async () => {
+  if (!S.msgName) return;
+  const file = await pickFile(".txt,text/plain");
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const res = await api(
+      `/api/msg.import?game=${S.game}` +
+      `&name=${encodeURIComponent(S.msgName)}`,
+      { method: "POST", body: text });
+    let msg = res.changed ? `已导入并写回 ${res.changed} 句修改`
+      : "文档与当前内容一致，没有修改";
+    if (res.unmatched_count) {
+      msg += `（${res.unmatched_count} 行无法识别已跳过）`;
+    }
+    toast(msg);
+    if (res.bad_chars && res.bad_chars.length) {
+      toast("注意: 有字符无法用 " + S.msgData.encoding +
+        " 表示，已变成 ? —— " + res.bad_chars.join(" "), true);
+    }
+    await openMsg(S.msgName);
+    await loadArchive();
+  } catch (ex) {
+    toast("导入失败: " + ex.message, true);
+  }
+};
 
 $("#msg-save").onclick = async () => {
   const edits = {};
@@ -503,6 +557,10 @@ $("#msg-save").onclick = async () => {
       `/api/msg?game=${S.game}&name=${encodeURIComponent(S.msgName)}`,
       { method: "POST", body: JSON.stringify(payload) });
     toast(res.changed ? `已保存 ${res.changed} 处修改` : "没有修改");
+    if (res.bad_chars && res.bad_chars.length) {
+      toast("注意: 有字符无法用 " + S.msgData.encoding +
+        " 表示，已变成 ? —— " + res.bad_chars.join(" "), true);
+    }
   } catch (ex) {
     toast("保存失败: " + ex.message, true);
   }
@@ -579,6 +637,44 @@ $("#musiccmt-save").onclick = async () => {
   } catch (ex) {
     toast("保存失败: " + ex.message, true);
   }
+};
+
+/* ---------------- 日志 ---------------- */
+async function loadLogs() {
+  try {
+    const data = await api("/api/logs?limit=300");
+    const tbody = $("#log-table tbody");
+    tbody.innerHTML = "";
+    if (!data.logs.length) {
+      tbody.innerHTML =
+        '<tr><td colspan="4" class="muted">还没有操作记录</td></tr>';
+      return;
+    }
+    data.logs.forEach((item) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td class="muted">${item.time}</td>
+        <td>${item.action}</td>
+        <td>${item.target || ""}</td>
+        <td class="muted">${item.detail || ""}</td>`;
+      tbody.appendChild(tr);
+    });
+  } catch (ex) {
+    toast("读取日志失败: " + ex.message, true);
+  }
+}
+
+$("#log-refresh").onclick = loadLogs;
+$("#log-clear").onclick = async () => {
+  if (!confirm("确定清空日志吗？")) return;
+  await api("/api/logs.clear", { method: "POST" });
+  toast("日志已清空");
+  await loadLogs();
+};
+$("#log-download").onclick = () => {
+  const a = document.createElement("a");
+  a.href = "/api/logs.download";
+  a.download = "modtool.log";
+  a.click();
 };
 
 /* ---------------- 备份 ---------------- */

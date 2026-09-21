@@ -33,7 +33,89 @@ from thtk import anm, archive, bgm, crypto, msg  # noqa: E402
 WEB_DIR = os.path.join(HERE, "web")
 STAGING_DIR = os.path.join(HERE, "staging")
 CONFIG_PATH = os.path.join(HERE, "config.json")
+LOG_DIR = os.path.join(HERE, "logs")
+LOG_PATH = os.path.join(LOG_DIR, "modtool.log")
 BACKUP_SUFFIX = ".modtool.bak"
+
+
+# ----------------------------------------------------------------------
+# 操作日志
+# ----------------------------------------------------------------------
+class Logger(object):
+    """记录所有写操作，内存保留最近若干条，同时追加到 JSONL 文件。"""
+
+    def __init__(self, path, memory_limit=800):
+        self.path = path
+        self.memory_limit = memory_limit
+        self.lock = threading.Lock()
+        self.entries = []
+        self.seq = 0
+        if not os.path.isdir(os.path.dirname(path)):
+            os.makedirs(os.path.dirname(path))
+        self._load()
+
+    def _load(self):
+        if not os.path.isfile(self.path):
+            return
+        try:
+            with io.open(self.path, "r", encoding="utf-8") as f:
+                lines = f.readlines()[-self.memory_limit:]
+            for line in lines:
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                self.entries.append(item)
+                self.seq = max(self.seq, int(item.get("id", 0)))
+        except OSError:
+            pass
+
+    def log(self, action, target="", detail="", level="info"):
+        with self.lock:
+            self.seq += 1
+            item = {
+                "id": self.seq,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "level": level,
+                "action": action,
+                "target": target,
+                "detail": detail,
+            }
+            self.entries.append(item)
+            if len(self.entries) > self.memory_limit:
+                self.entries = self.entries[-self.memory_limit:]
+            try:
+                with io.open(self.path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            except OSError:
+                pass
+            line = "[%s] %s %s %s" % (item["time"], action,
+                                      target, detail)
+            sys.stderr.write("[modtool] " + line + "\n")
+            return item
+
+    def list(self, limit=200, level=None):
+        with self.lock:
+            items = self.entries
+            if level:
+                items = [i for i in items if i.get("level") == level]
+            return list(reversed(items[-limit:]))
+
+    def clear(self):
+        with self.lock:
+            self.entries = []
+            try:
+                if os.path.isfile(self.path):
+                    os.remove(self.path)
+            except OSError:
+                pass
+
+
+LOG = Logger(LOG_PATH)
+
+
+def log(action, target="", detail="", level="info"):
+    return LOG.log(action, target, detail, level)
 
 GAME_DIR = os.path.join(WS, "game",
                         "[th12] 东方星莲船 (汉化版+日文版)")
@@ -121,6 +203,8 @@ def ensure_backup(path):
     bak = path + BACKUP_SUFFIX
     if os.path.exists(path) and not os.path.exists(bak):
         shutil.copy2(path, bak)
+        log("创建备份", os.path.basename(bak),
+            human_size(os.path.getsize(bak)))
     return bak
 
 
@@ -251,7 +335,7 @@ def list_archive(key):
             "label": GAMES[key]["label"]}
 
 
-def save_archive_entry(key, name, data):
+def save_archive_entry(key, name, data, action="写入归档文件", detail=""):
     """替换归档里的一个条目（自动备份）。"""
     with STATE.lock:
         a = STATE.archive(key)
@@ -262,6 +346,8 @@ def save_archive_entry(key, name, data):
         ensure_backup(path)
         a.save_patched(path, {idx: data})
         STATE.anm_cache = {}
+    log(action, "%s / %s" % (GAMES[key]["label"], name),
+        detail or human_size(len(data)))
     return {"ok": True, "name": name, "size": len(data)}
 
 
@@ -312,7 +398,11 @@ def replace_texture(key, anm_name, index, png_data):
     rgba = np.array(img)
     encoded = anm.encode_rgba(t.format, rgba)
     new_texture = f.replace_texture(t, encoded, img.width, img.height)
-    save_archive_entry(key, anm_name, f.to_bytes())
+    save_archive_entry(
+        key, anm_name, f.to_bytes(), action="替换贴图",
+        detail="%s #%d %dx%d %s" % (t.name, t.entry_index,
+                                    img.width, img.height,
+                                    new_texture.format_name))
     return {"ok": True, "width": img.width, "height": img.height,
             "format": new_texture.format_name}
 
@@ -364,6 +454,9 @@ def bgm_replace(index, wav_data):
     with STATE.lock:
         STATE.bgm_pending[index] = path
         STATE.bgm_replaced.add(index)
+    log("替换BGM（暂存）", fmt.tracks[index].name,
+        "%.1f 秒 / %s" % (len(pcm) / float(bgm.BYTES_PER_SEC),
+                          human_size(len(pcm))))
     return {"ok": True, "seconds": len(pcm) / float(bgm.BYTES_PER_SEC)}
 
 
@@ -375,11 +468,14 @@ def bgm_set_loop(index, loop_bytes):
     loop_bytes -= loop_bytes % 4
     with STATE.lock:
         STATE.bgm_loop[index] = loop_bytes
+    log("设置BGM循环点", fmt.tracks[index].name,
+        "%.2f 秒" % (loop_bytes / float(bgm.BYTES_PER_SEC)))
     return {"ok": True, "loop": loop_bytes}
 
 
 def bgm_cancel():
     with STATE.lock:
+        n = len(STATE.bgm_pending)
         for path in STATE.bgm_pending.values():
             try:
                 os.remove(path)
@@ -388,11 +484,15 @@ def bgm_cancel():
         STATE.bgm_pending = {}
         STATE.bgm_loop = {}
         STATE.bgm_replaced = set()
+    if n:
+        log("放弃BGM修改", "%d 项" % n)
     return {"ok": True}
 
 
 def _apply_bgm(job):
     fmt = STATE.bgm_fmt()
+    replaced = len(STATE.bgm_pending)
+    loops = len(STATE.bgm_loop)
     # 1) 应用循环点
     for idx, loop in STATE.bgm_loop.items():
         fmt.tracks[idx].loop = loop
@@ -439,6 +539,8 @@ def _apply_bgm(job):
         STATE.bgm_replaced = set()
         STATE.invalidate()
     job["message"] = "完成"
+    log("应用BGM修改", "%d 首替换 / %d 首循环点" % (replaced, loops),
+        human_size(os.path.getsize(BGM_DAT)))
 
 
 def start_bgm_apply():
@@ -465,18 +567,60 @@ def get_msg(key, name):
     raw = a.read_by_name(name)
     encoding = GAMES[key]["encoding"]
     f = msg.MsgFile.from_bytes(raw, encoding)
+    info = msg.describe_file(name)
     entries = []
     for i, entry in enumerate(f.entries):
         instrs = []
+        speaker = None
         for j, ins in enumerate(entry.instructions):
-            item = {"index": j, "time": ins.time, "type": ins.type,
-                    "length": len(ins.data)}
+            if ins.type == msg.SPEAKER_PLAYER:
+                speaker = "player"
+            elif ins.type == msg.SPEAKER_BOSS:
+                speaker = "boss"
+            elif ins.type == msg.SPEAKER_NONE:
+                speaker = "none"
+            item = {
+                "index": j,
+                "time": ins.time,
+                "type": ins.type,
+                "length": len(ins.data),
+                "name": msg.INSTR_NAMES.get(ins.type, "ins_%d" % ins.type),
+            }
             if ins.is_text:
                 item["text"] = ins.text(encoding)
+                item["speaker"] = speaker
+                item["speaker_label"] = msg.SPEAKER_LABELS.get(speaker, "")
             instrs.append(item)
         entries.append({"index": i, "extra": entry.extra,
                         "instructions": instrs})
-    return {"name": name, "encoding": encoding, "entries": entries}
+    return {"name": name, "encoding": encoding, "info": info,
+            "player": info.get("player"), "boss": info.get("boss"),
+            "scene": info.get("scene"), "entries": entries}
+
+
+def msg_document(key, name):
+    """导出对话文档（UTF-8 文本）。"""
+    a = STATE.archive(key)
+    raw = a.read_by_name(name)
+    encoding = GAMES[key]["encoding"]
+    f = msg.MsgFile.from_bytes(raw, encoding)
+    return msg.export_document(f, name, encoding)
+
+
+def msg_import_document(key, name, text):
+    """导入编辑过的对话文档并写回归档。"""
+    a = STATE.archive(key)
+    raw = a.read_by_name(name)
+    encoding = GAMES[key]["encoding"]
+    f = msg.MsgFile.from_bytes(raw, encoding)
+    changed, unmatched, bad_chars = msg.import_document(text, f, encoding)
+    if changed:
+        save_archive_entry(key, name, f.to_bytes(), action="导入对话文档",
+                           detail="修改 %d 句" % changed)
+    return {"ok": True, "changed": changed,
+            "unmatched": unmatched[:20],
+            "unmatched_count": len(unmatched),
+            "bad_chars": bad_chars[:20]}
 
 
 def save_msg(key, name, payload):
@@ -487,6 +631,7 @@ def save_msg(key, name, payload):
     f = msg.MsgFile.from_bytes(raw, encoding)
     edits = payload.get("entries", [])
     changed = 0
+    bad_chars = []
     for item in edits:
         ei = int(item["index"])
         if ei < 0 or ei >= len(f.entries):
@@ -497,11 +642,15 @@ def save_msg(key, name, payload):
             if 0 <= ji < len(entry.instructions):
                 ins = entry.instructions[ji]
                 if ins.is_text and ins.text(encoding) != text:
+                    for ch in msg.check_encoding(text, encoding):
+                        if ch not in bad_chars:
+                            bad_chars.append(ch)
                     ins.set_text(text, encoding)
                     changed += 1
     if changed:
-        save_archive_entry(key, name, f.to_bytes())
-    return {"ok": True, "changed": changed}
+        save_archive_entry(key, name, f.to_bytes(), action="保存对话",
+                           detail="修改 %d 句" % changed)
+    return {"ok": True, "changed": changed, "bad_chars": bad_chars[:20]}
 
 
 def get_musiccmt(key):
@@ -546,6 +695,7 @@ def set_config(payload):
     cfg = load_config()
     cfg["game_dir"] = GAME_DIR
     save_config(cfg)
+    log("切换游戏目录", GAME_DIR, "版本: %s" % "/".join(found))
     return get_config()
 
 
@@ -589,13 +739,15 @@ def launch_game(key=None):
     cfg = load_config()
     cfg["last_game"] = key
     save_config(cfg)
+    log("启动游戏", exe_name, GAME_DIR)
     return {"ok": True, "exe": exe_name}
 
 
 def save_musiccmt(key, text):
     encoding = GAMES[key]["encoding"]
     data = text.encode(encoding, "replace")
-    save_archive_entry(key, "musiccmt.txt", data)
+    save_archive_entry(key, "musiccmt.txt", data, action="保存音乐室评论",
+                       detail="%d 字符" % len(text))
     return {"ok": True, "size": len(data)}
 
 
@@ -641,6 +793,7 @@ def restore_backup(which):
     with STATE.lock:
         shutil.copy2(bak, target)
         STATE.invalidate()
+    log("还原备份", os.path.basename(bak), os.path.basename(target))
     return {"ok": True}
 
 
@@ -753,6 +906,29 @@ class Handler(BaseHTTPRequestHandler):
         if route == "msg":
             return self._json(get_msg(q.get("game", "jp"),
                                       q.get("name", "")))
+        if route == "msg.doc":
+            key = q.get("game", "jp")
+            name = q.get("name", "")
+            text = msg_document(key, name)
+            fname = urllib.parse.quote(
+                name.rsplit(".", 1)[0] + ".txt")
+            return self._send(200, text.encode("utf-8"),
+                              "text/plain; charset=utf-8",
+                              {"Content-Disposition":
+                               "attachment; filename*=UTF-8''%s" % fname})
+        if route == "logs":
+            limit = int(q.get("limit", "200"))
+            return self._json({"logs": LOG.list(limit)})
+        if route == "logs.download":
+            if os.path.isfile(LOG_PATH):
+                with open(LOG_PATH, "rb") as f:
+                    data = f.read()
+            else:
+                data = b""
+            fname = urllib.parse.quote("modtool.log")
+            return self._send(200, data, "text/plain; charset=utf-8",
+                              {"Content-Disposition":
+                               "attachment; filename*=UTF-8''%s" % fname})
         if route == "musiccmt":
             return self._json(get_musiccmt(q.get("game", "jp")))
         if route == "backups":
@@ -790,6 +966,14 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(body.decode("utf-8") or "{}")
                 return self._json(save_msg(
                     q.get("game", "jp"), q.get("name", ""), payload))
+            if route == "msg.import":
+                text = body.decode("utf-8-sig", "replace")
+                return self._json(msg_import_document(
+                    q.get("game", "jp"), q.get("name", ""), text))
+            if route == "logs.clear":
+                LOG.clear()
+                log("清空日志")
+                return self._json({"ok": True})
             if route == "musiccmt":
                 payload = json.loads(body.decode("utf-8") or "{}")
                 return self._json(save_musiccmt(

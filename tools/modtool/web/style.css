@@ -144,6 +144,15 @@ main { flex: 1; min-height: 0; display: flex; }
 .msg-entry textarea {
   width: 100%; min-height: 34px; resize: vertical; font-size: 13px;
 }
+.msg-line { display: flex; gap: 8px; align-items: flex-start; }
+.speaker {
+  flex: 0 0 44px; text-align: center; font-size: 11px; padding: 3px 0;
+  border-radius: 5px; margin-top: 4px; user-select: none;
+}
+.speaker-player { background: rgba(90,169,255,.18); color: var(--accent2); }
+.speaker-boss   { background: rgba(255,93,115,.18); color: var(--accent); }
+.speaker-none   { background: rgba(138,147,168,.18); color: var(--muted); }
+.speaker-unknown{ background: var(--bg3); color: var(--muted); }
 .msg-ops { display: flex; flex-wrap: wrap; gap: 5px; padding: 4px 12px 10px; }
 .msg-ops .pill { cursor: default; }
 .msg-ops .pill.text { background: rgba(90,169,255,.15); color: var(--accent2); }
