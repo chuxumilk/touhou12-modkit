@@ -46,6 +46,7 @@
   <button data-tab="texture" class="active">贴图</button>
   <button data-tab="bgm">音乐</button>
   <button data-tab="dialogue">对话</button>
+  <button data-tab="batch">批量导入</button>
   <button data-tab="files">任意文件</button>
   <button data-tab="musiccmt">音乐室评论</button>
   <button data-tab="log">日志</button>
@@ -113,6 +114,36 @@
         </div>
       </div>
       <div id="msg-body" class="msg-body"></div>
+    </div>
+  </section>
+
+  <!-- ======================= 批量导入 ======================= -->
+  <section id="tab-batch" class="tab">
+    <div class="content wide">
+      <div class="content-head">
+        <h2>批量导入（按文件名自动替换）</h2>
+        <div class="actions">
+          <button id="batch-folder" class="primary">选择文件夹…</button>
+          <button id="batch-files">选择多个文件…</button>
+          <button id="batch-apply" class="primary" disabled>应用全部</button>
+          <button id="batch-clear" disabled>清空列表</button>
+        </div>
+      </div>
+      <p class="hint">
+        支持的命名方式：
+        <code>ascii.anm_0.png</code>（贴图，格式 <code>文件名_贴图序号.png</code>）、
+        <code>etama@bullet@0.png</code>（贴图，thanm 风格）、
+        <code>st01_00a.txt</code>（对话文档）、
+        以及和归档里同名的文件（<code>stage01.ecl</code>、<code>st01_00a.msg</code> 等，原样替换）。
+        当前游戏版本：<b id="batch-game"></b>
+      </p>
+      <div id="batch-progress" class="progress hidden"><div></div></div>
+      <table class="table" id="batch-table">
+        <thead>
+          <tr><th>文件</th><th>识别为</th><th>目标</th><th>说明</th><th>操作</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
   </section>
 
@@ -187,6 +218,8 @@
 <div id="toast" class="toast hidden"></div>
 <div id="lightbox" class="lightbox hidden"><img id="lightbox-img" alt=""></div>
 <input id="hidden-file" type="file" class="hidden">
+<input id="hidden-folder" type="file" webkitdirectory directory multiple class="hidden">
+<input id="hidden-files" type="file" multiple class="hidden">
 
 <script src="/app.js"></script>
 </body>

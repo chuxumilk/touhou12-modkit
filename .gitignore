@@ -1,23 +1,24 @@
-# ===== 游戏本体与数据（体积大，不入库）=====
+﻿# ===== 娓告垙鏈綋涓庢暟鎹紙浣撶Н澶э紝涓嶅叆搴擄級=====
 game/
 
-# ===== 逆向调研中的第三方源码 / 构建产物 / 解包结果 =====
+# ===== 閫嗗悜璋冪爺涓殑绗笁鏂规簮鐮?/ 鏋勫缓浜х墿 / 瑙ｅ寘缁撴灉 =====
 _recon/build-thtk/
 _recon/build-static/
 _recon/src/
 _recon/x_official/
 _recon/x_official_cn/
-_recon/testgame/
+_recon/testgame*/
 
-# ===== 运行时产物 =====
+# ===== 杩愯鏃朵骇鐗?=====
 tools/modtool/staging/
 tools/modtool/logs/
 tools/modtool/config.json
 __pycache__/
 *.py[cod]
 
-# ===== 备份 / 临时文件 =====
+# ===== 澶囦唤 / 涓存椂鏂囦欢 =====
 *.modtool.bak
 *.bak
 *.tmp
 *.new
+

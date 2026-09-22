@@ -55,7 +55,7 @@ INSTR_NAMES = {
     34: "portraitHighlight", 35: "lightsOut",
 }
 
-#: 说话人显示名
+#: 说话人显示名（没有具体角色名时的兜底）
 SPEAKER_LABELS = {
     "player": "自机",
     "boss": "敌机",
@@ -120,6 +120,27 @@ def check_encoding(text, encoding):
         except UnicodeEncodeError:
             bad.append(ch)
     return bad
+
+
+def speaker_labels(filename):
+    """返回该文件里三种说话人的显示名。
+
+    自机 / 敌机 会尽量换成具体角色名（如 ``博丽灵梦`` / ``云居一轮``）。
+    """
+    info = describe_file(filename)
+    return {
+        "player": info.get("player") or SPEAKER_LABELS["player"],
+        "boss": info.get("boss") or SPEAKER_LABELS["boss"],
+        "none": SPEAKER_LABELS["none"],
+    }
+
+
+#: 文档里允许出现的说话人标签（导入时用于识别并剥离）
+def _label_set():
+    labels = set(SPEAKER_LABELS.values())
+    labels.update(PLAYER_CHARS.values())
+    labels.update(STAGE_BOSS.values())
+    return labels
 
 
 def rolling_xor(data, key=TEXT_XOR_KEY, step1=TEXT_XOR_STEP1,
@@ -332,14 +353,17 @@ def guess_encoding(data):
 # 对话文档（导出 / 导入）
 # ----------------------------------------------------------------------
 #: 文档里每行的格式：  [条目号.指令号] [说话人] 文本
+#: 第二个方括号内容不固定（可能是 自机/敌机/旁白，也可能是角色名），
+#: 导入时只有命中已知说话人标签才会被剥离。
 DOC_LINE_RE = re.compile(
-    r"^\s*\[(\d+)\.(\d+)\]\s*(?:\[(自机|敌机|旁白)\])?\s?(.*)$")
+    r"^\s*\[(\d+)\.(\d+)\]\s*(?:\[([^\]]*)\])?\s?(.*)$")
 
 
 def export_document(msgfile, filename, encoding=None):
     """把对话导出成可编辑的文本（UTF-8），供翻译/校对使用。"""
     encoding = encoding or msgfile.encoding
     info = describe_file(filename)
+    labels = speaker_labels(filename)
     head = []
     head.append("# 东方星莲船 对话文档")
     head.append("# 文件: %s" % filename)
@@ -357,7 +381,8 @@ def export_document(msgfile, filename, encoding=None):
     head.append("#")
     head.append("# 修改方法：只改每行 [条目.指令] 后面的文字，"
                 "保存后用工具的「导入文档」写回。")
-    head.append("# 行首的 [自机]/[敌机]/[旁白] 只是提示，删掉也不影响导入。")
+    head.append("# 行首的 [%s] 只是提示，删掉也不影响导入。" %
+                "]/[".join([labels["player"], labels["boss"], labels["none"]]))
     head.append("# " + "=" * 58)
 
     lines = list(head)
@@ -365,20 +390,24 @@ def export_document(msgfile, filename, encoding=None):
         lines.append("")
         lines.append("# ---- 条目 %d (id=%d) ----" % (ei, entry.extra))
         for ji, speaker, text in entry.lines(encoding):
-            tag = SPEAKER_LABELS.get(speaker, "")
+            tag = labels.get(speaker, "")
             lines.append("[%d.%d] [%s] %s" % (ei, ji, tag, text))
     return "\n".join(lines) + "\n"
 
 
-def import_document(text, msgfile, encoding=None):
+def import_document(text, msgfile, encoding=None, dry_run=False):
     """把编辑过的文档写回 ``msgfile``。
 
-    返回 ``(修改条数, 未匹配行列表, 无法编码的字符列表)``。
+    :param dry_run: 为真时只计算差异，不修改 ``msgfile``。
+    :return: ``(修改条数, 未匹配行列表, 无法编码的字符列表, 差异列表)``
+             差异列表元素为 ``(条目号, 指令号, 原文, 新文)``。
     """
     encoding = encoding or msgfile.encoding
+    labels = _label_set()
     changed = 0
     unmatched = []
     bad_chars = []
+    changes = []
     for raw in text.splitlines():
         line = raw.rstrip("\r\n")
         if not line.strip() or line.lstrip().startswith("#"):
@@ -389,6 +418,9 @@ def import_document(text, msgfile, encoding=None):
             continue
         ei, ji = int(m.group(1)), int(m.group(2))
         new_text = m.group(4)
+        # 第二个方括号只有确实是说话人标签时才剥离
+        if m.group(3) is not None and m.group(3) not in labels:
+            new_text = "[%s] %s" % (m.group(3), new_text)
         if ei >= len(msgfile.entries):
             unmatched.append(line)
             continue
@@ -400,10 +432,13 @@ def import_document(text, msgfile, encoding=None):
         if not ins.is_text:
             unmatched.append(line)
             continue
-        if ins.text(encoding) != new_text:
+        old_text = ins.text(encoding)
+        if old_text != new_text:
+            changes.append((ei, ji, old_text, new_text))
             for ch in check_encoding(new_text, encoding):
                 if ch not in bad_chars:
                     bad_chars.append(ch)
-            ins.set_text(new_text, encoding)
+            if not dry_run:
+                ins.set_text(new_text, encoding)
             changed += 1
-    return changed, unmatched, bad_chars
+    return changed, unmatched, bad_chars, changes

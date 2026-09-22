@@ -71,6 +71,7 @@ $$("#tabs button").forEach((btn) => {
     $("#tab-" + btn.dataset.tab).classList.add("active");
     if (btn.dataset.tab === "backup") loadBackups();
     if (btn.dataset.tab === "log") loadLogs();
+    if (btn.dataset.tab === "batch") loadBatch();
   };
 });
 
@@ -513,26 +514,44 @@ $("#msg-export").onclick = () => {
   toast("已导出对话文档，可用任意文本编辑器翻译后再导入");
 };
 
+function diffSummary(res, limit) {
+  const lines = [];
+  (res.changes || []).slice(0, limit || 8).forEach((c) => {
+    lines.push(`[${c.entry}.${c.instr}]\n  旧: ${c.old}\n  新: ${c.new}`);
+  });
+  if (res.changes && res.changes.length > (limit || 8)) {
+    lines.push(`… 还有 ${res.changes.length - (limit || 8)} 处`);
+  }
+  if (res.unmatched_count) {
+    lines.push(`（${res.unmatched_count} 行无法识别，将跳过）`);
+  }
+  if (res.bad_chars && res.bad_chars.length) {
+    lines.push(`（警告: 这些字符无法用 ${res.encoding || "目标编码"} ` +
+      `表示，会变成 ? —— ${res.bad_chars.join(" ")}）`);
+  }
+  return lines.join("\n");
+}
+
 $("#msg-import").onclick = async () => {
   if (!S.msgName) return;
   const file = await pickFile(".txt,text/plain");
   if (!file) return;
   try {
     const text = await file.text();
-    const res = await api(
+    const url = `/api/msg.preview?game=${S.game}` +
+      `&name=${encodeURIComponent(S.msgName)}`;
+    const res = await api(url, { method: "POST", body: text });
+    if (!res.changed) {
+      toast("文档与当前内容一致，没有需要修改的地方");
+      return;
+    }
+    if (!confirm(`将修改 ${res.changed} 句对话：\n\n` +
+      diffSummary(res) + "\n\n确认导入吗？")) return;
+    const res2 = await api(
       `/api/msg.import?game=${S.game}` +
       `&name=${encodeURIComponent(S.msgName)}`,
       { method: "POST", body: text });
-    let msg = res.changed ? `已导入并写回 ${res.changed} 句修改`
-      : "文档与当前内容一致，没有修改";
-    if (res.unmatched_count) {
-      msg += `（${res.unmatched_count} 行无法识别已跳过）`;
-    }
-    toast(msg);
-    if (res.bad_chars && res.bad_chars.length) {
-      toast("注意: 有字符无法用 " + S.msgData.encoding +
-        " 表示，已变成 ? —— " + res.bad_chars.join(" "), true);
-    }
+    toast(`已导入并写回 ${res2.changed} 句修改`);
     await openMsg(S.msgName);
     await loadArchive();
   } catch (ex) {
@@ -636,6 +655,145 @@ $("#musiccmt-save").onclick = async () => {
     toast("音乐室评论已保存");
   } catch (ex) {
     toast("保存失败: " + ex.message, true);
+  }
+};
+
+/* ---------------- 批量导入 ---------------- */
+const BATCH_EXT = /\.(png|txt|msg|ecl|sht|std|rpy|wav)$/i;
+
+function batchReadyText(counts) {
+  const parts = [];
+  if (counts.texture) parts.push("贴图 " + counts.texture);
+  if (counts.dialogue) parts.push("对话 " + counts.dialogue);
+  if (counts.raw) parts.push("文件 " + counts.raw);
+  if (counts.musiccmt) parts.push("评论 " + counts.musiccmt);
+  if (counts.unknown) parts.push("未识别 " + counts.unknown);
+  return parts.join(" · ") || "空";
+}
+
+async function loadBatch() {
+  try {
+    const data = await api("/api/batch");
+    const tbody = $("#batch-table tbody");
+    tbody.innerHTML = "";
+    if (!data.items.length) {
+      tbody.innerHTML =
+        '<tr><td colspan="5" class="muted">还没有文件，点右上角「选择文件夹…」</td></tr>';
+    }
+    data.items.forEach((it) => {
+      const kindName = {
+        texture: "贴图", dialogue: "对话文档", raw: "原样替换",
+        musiccmt: "音乐室评论", unknown: "未识别",
+      }[it.kind] || it.kind;
+      const tr = document.createElement("tr");
+      const canPreview = it.kind === "dialogue" &&
+        it.changes && it.changes.length;
+      tr.innerHTML = `
+        <td>${it.file}</td>
+        <td><span class="pill ${it.kind === "unknown" ? "warn" : "ok"}">${kindName}</span></td>
+        <td>${it.target}${it.kind === "texture" ? " #" + it.index : ""}</td>
+        <td class="muted">${it.detail || ""}</td>
+        <td><div class="row-actions">
+          ${canPreview ? '<button class="mini" data-act="preview">预览改动</button>' : ""}
+          <button class="mini" data-act="del">移除</button>
+        </div></td>`;
+      if (canPreview) {
+        tr.querySelector('[data-act="preview"]').onclick = () =>
+          alert(`${it.file}\n\n` + diffSummary(it, 15));
+      }
+      tr.querySelector('[data-act="del"]').onclick = async () => {
+        await api(`/api/batch.remove?id=${it.id}`, { method: "POST" });
+        await loadBatch();
+      };
+      tbody.appendChild(tr);
+    });
+    $("#batch-apply").disabled = data.ready === 0;
+    $("#batch-clear").disabled = data.items.length === 0;
+    $("#batch-game").textContent =
+      ($("#game-select").selectedOptions[0] || {}).textContent || S.game;
+  } catch (ex) {
+    toast("读取暂存区失败: " + ex.message, true);
+  }
+}
+
+async function batchAddFiles(fileList) {
+  const files = Array.from(fileList).filter((f) => BATCH_EXT.test(f.name));
+  if (!files.length) {
+    toast("没有可导入的文件（支持 png / txt / msg / ecl / sht / std / rpy / wav）", true);
+    return;
+  }
+  const bar = $("#batch-progress");
+  const inner = bar.firstElementChild;
+  bar.classList.remove("hidden");
+  inner.style.width = "0%";
+  let done = 0;
+  const workers = 6;
+  let index = 0;
+  async function worker() {
+    while (index < files.length) {
+      const f = files[index++];
+      const name = f.webkitRelativePath || f.name;
+      try {
+        await api(`/api/batch.add?game=${S.game}` +
+          `&name=${encodeURIComponent(name)}`,
+          { method: "POST", body: f });
+      } catch (ex) {
+        toast("上传失败: " + f.name + " - " + ex.message, true);
+      }
+      done++;
+      inner.style.width = Math.round(done / files.length * 100) + "%";
+    }
+  }
+  await Promise.all(Array.from({ length: workers }, worker));
+  bar.classList.add("hidden");
+  await loadBatch();
+  const data = await api("/api/batch");
+  toast("已识别 " + data.ready + " 个文件（" +
+    batchReadyText(data.counts) + "）");
+}
+
+$("#batch-folder").onclick = () => {
+  const input = $("#hidden-folder");
+  input.value = "";
+  input.onchange = () => batchAddFiles(input.files);
+  input.click();
+};
+
+$("#batch-files").onclick = () => {
+  const input = $("#hidden-files");
+  input.value = "";
+  input.onchange = () => batchAddFiles(input.files);
+  input.click();
+};
+
+$("#batch-clear").onclick = async () => {
+  await api("/api/batch.clear", { method: "POST" });
+  await loadBatch();
+  toast("已清空列表");
+};
+
+$("#batch-apply").onclick = async () => {
+  const data = await api("/api/batch");
+  if (!data.ready) return;
+  if (!confirm(`确定导入这 ${data.ready} 个文件吗？\n\n` +
+    `会先自动备份原文件。\n（${batchReadyText(data.counts)}）`)) return;
+  try {
+    const res = await api("/api/batch.apply", { method: "POST" });
+    let msg = `导入完成：贴图 ${res.texture} · 对话 ${res.dialogue} · ` +
+      `原样 ${res.raw} · 评论 ${res.musiccmt}`;
+    if (res.changed_lines) msg += `（对话共改 ${res.changed_lines} 句）`;
+    toast(msg);
+    if (res.unknown) toast(`有 ${res.unknown} 个文件未识别，已跳过`, true);
+    if (res.errors && res.errors.length) {
+      toast("部分失败: " + res.errors.slice(0, 3).join("；"), true);
+    }
+    if (res.bad_chars && res.bad_chars.length) {
+      toast("有字符无法编码，已变成 ? —— " + res.bad_chars.join(" "), true);
+    }
+    await loadBatch();
+    await loadArchive();
+  } catch (ex) {
+    toast("导入失败: " + ex.message, true);
   }
 };
 

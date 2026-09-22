@@ -146,8 +146,9 @@ main { flex: 1; min-height: 0; display: flex; }
 }
 .msg-line { display: flex; gap: 8px; align-items: flex-start; }
 .speaker {
-  flex: 0 0 44px; text-align: center; font-size: 11px; padding: 3px 0;
+  flex: 0 0 76px; text-align: center; font-size: 11px; padding: 3px 2px;
   border-radius: 5px; margin-top: 4px; user-select: none;
+  white-space: nowrap; overflow: hidden;
 }
 .speaker-player { background: rgba(90,169,255,.18); color: var(--accent2); }
 .speaker-boss   { background: rgba(255,93,115,.18); color: var(--accent); }

@@ -13,6 +13,7 @@ import argparse
 import io
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -255,6 +256,8 @@ class State(object):
         self.jobs = {}
         self.job_seq = 0
         self.game_key = "jp"
+        self.batch = []
+        self.batch_seq = 0
         if not os.path.isdir(STAGING_DIR):
             os.makedirs(STAGING_DIR)
 
@@ -568,6 +571,7 @@ def get_msg(key, name):
     encoding = GAMES[key]["encoding"]
     f = msg.MsgFile.from_bytes(raw, encoding)
     info = msg.describe_file(name)
+    labels = msg.speaker_labels(name)
     entries = []
     for i, entry in enumerate(f.entries):
         instrs = []
@@ -589,13 +593,14 @@ def get_msg(key, name):
             if ins.is_text:
                 item["text"] = ins.text(encoding)
                 item["speaker"] = speaker
-                item["speaker_label"] = msg.SPEAKER_LABELS.get(speaker, "")
+                item["speaker_label"] = labels.get(speaker, "")
             instrs.append(item)
         entries.append({"index": i, "extra": entry.extra,
                         "instructions": instrs})
     return {"name": name, "encoding": encoding, "info": info,
             "player": info.get("player"), "boss": info.get("boss"),
-            "scene": info.get("scene"), "entries": entries}
+            "scene": info.get("scene"), "labels": labels,
+            "entries": entries}
 
 
 def msg_document(key, name):
@@ -607,20 +612,26 @@ def msg_document(key, name):
     return msg.export_document(f, name, encoding)
 
 
-def msg_import_document(key, name, text):
-    """导入编辑过的对话文档并写回归档。"""
+def msg_import_document(key, name, text, dry_run=False):
+    """导入编辑过的对话文档并写回归档（dry_run 时只预览差异）。"""
     a = STATE.archive(key)
     raw = a.read_by_name(name)
     encoding = GAMES[key]["encoding"]
     f = msg.MsgFile.from_bytes(raw, encoding)
-    changed, unmatched, bad_chars = msg.import_document(text, f, encoding)
-    if changed:
+    changed, unmatched, bad_chars, changes = msg.import_document(
+        text, f, encoding, dry_run=dry_run)
+    if changed and not dry_run:
         save_archive_entry(key, name, f.to_bytes(), action="导入对话文档",
                            detail="修改 %d 句" % changed)
     return {"ok": True, "changed": changed,
             "unmatched": unmatched[:20],
             "unmatched_count": len(unmatched),
-            "bad_chars": bad_chars[:20]}
+            "bad_chars": bad_chars[:20],
+            "dry_run": bool(dry_run),
+            "changes": [
+                {"entry": e, "instr": i, "old": o, "new": n}
+                for e, i, o, n in changes[:200]
+            ]}
 
 
 def save_msg(key, name, payload):
@@ -749,6 +760,265 @@ def save_musiccmt(key, text):
     save_archive_entry(key, "musiccmt.txt", data, action="保存音乐室评论",
                        detail="%d 字符" % len(text))
     return {"ok": True, "size": len(data)}
+
+
+# ----------------------------------------------------------------------
+# 批量导入（按文件名自动识别）
+# ----------------------------------------------------------------------
+#: 贴图文件名格式： ``{anm}_{index}.png`` 或 ``{贴图名}@{anm}@{index}.png``
+BATCH_TEXTURE_RE = re.compile(
+    r"^(?P<anm>[^@/\\]+?)(?:\.anm)?_(?P<idx>\d+)\.png$", re.IGNORECASE)
+BATCH_TEXTURE_ALT_RE = re.compile(
+    r"^(?P<name>.*)@(?P<anm>[^@]+)@(?P<idx>\d+)\.png$", re.IGNORECASE)
+
+
+def _batch_classify(key, filename, size):
+    """判断一个待导入文件的目标。"""
+    base = os.path.basename(filename.replace("\\", "/"))
+    a = STATE.archive(key)
+    # 1) 贴图 PNG
+    if base.lower().endswith(".png"):
+        m = BATCH_TEXTURE_RE.match(base)
+        anm_name = None
+        idx = None
+        if m:
+            anm_name = m.group("anm")
+            idx = int(m.group("idx"))
+        else:
+            m = BATCH_TEXTURE_ALT_RE.match(base)
+            if m:
+                anm_name = m.group("anm")
+                idx = int(m.group("idx"))
+        if anm_name is not None:
+            for cand in (anm_name, anm_name + ".anm"):
+                i = a.index_of(cand)
+                if i >= 0:
+                    return {"kind": "texture", "target": cand, "index": idx,
+                            "detail": "贴图 #%d" % idx}
+            return {"kind": "unknown", "target": base,
+                    "detail": "找不到贴图文件 %s.anm" % anm_name}
+    # 2) 对话文档 .txt
+    if base.lower().endswith(".txt"):
+        stem = base[:-4]
+        for cand in (stem, stem + ".msg"):
+            i = a.index_of(cand)
+            if i >= 0 and cand.endswith(".msg"):
+                return {"kind": "dialogue", "target": cand,
+                        "detail": "对话文档"}
+        if stem == "musiccmt":
+            return {"kind": "musiccmt", "target": "musiccmt.txt",
+                    "detail": "音乐室评论"}
+        return {"kind": "unknown", "target": base,
+                "detail": "归档里没有对应的 .msg"}
+    # 3) 原样替换（文件名与归档条目一致）
+    i = a.index_of(base)
+    if i >= 0:
+        return {"kind": "raw", "target": base,
+                "detail": human_size(a.entries[i].size)}
+    return {"kind": "unknown", "target": base, "detail": "归档里没有这个文件"}
+
+
+def batch_add(key, filename, data):
+    """把一个文件加入批量导入暂存区，返回识别结果。"""
+    info = _batch_classify(key, filename, len(data))
+    STATE.batch_seq += 1
+    seq = STATE.batch_seq
+    ext = os.path.splitext(filename)[1].lower() or ".bin"
+    staged = os.path.join(STAGING_DIR, "batch_%03d%s" % (seq, ext))
+    with open(staged, "wb") as f:
+        f.write(data)
+    # 对话文档：先算一遍差异，方便在列表里预览
+    changes = []
+    if info["kind"] == "dialogue":
+        try:
+            a = STATE.archive(key)
+            encoding = GAMES[key]["encoding"]
+            f_msg = msg.MsgFile.from_bytes(a.read_by_name(info["target"]),
+                                           encoding)
+            text = data.decode("utf-8-sig", "replace")
+            n, unmatched, bad, changes = msg.import_document(
+                text, f_msg, encoding, dry_run=True)
+            info["detail"] = "将修改 %d 句" % n
+            if unmatched:
+                info["detail"] += "，%d 行未识别" % len(unmatched)
+            if bad:
+                info["detail"] += "，%d 个字符无法编码" % len(bad)
+        except Exception as ex:
+            info["detail"] = "解析失败: %s" % ex
+    item = {
+        "id": seq,
+        "file": os.path.basename(filename.replace("\\", "/")),
+        "path": filename,
+        "size": len(data),
+        "staged": staged,
+        "game": key,
+        "changes": [
+            {"entry": e, "instr": i, "old": o, "new": n}
+            for e, i, o, n in changes[:50]
+        ],
+    }
+    item.update(info)
+    with STATE.lock:
+        STATE.batch = [x for x in STATE.batch if x["file"] != item["file"]]
+        STATE.batch.append(item)
+    return item
+
+
+def batch_list():
+    with STATE.lock:
+        items = list(STATE.batch)
+    counts = {}
+    for it in items:
+        counts[it["kind"]] = counts.get(it["kind"], 0) + 1
+    return {"items": items, "counts": counts,
+            "total": len(items),
+            "ready": counts.get("texture", 0) + counts.get("dialogue", 0) +
+                     counts.get("raw", 0) + counts.get("musiccmt", 0)}
+
+
+def batch_remove(item_id):
+    with STATE.lock:
+        for it in list(STATE.batch):
+            if it["id"] == item_id:
+                STATE.batch.remove(it)
+                try:
+                    os.remove(it["staged"])
+                except OSError:
+                    pass
+    return {"ok": True}
+
+
+def batch_clear():
+    with STATE.lock:
+        for it in STATE.batch:
+            try:
+                os.remove(it["staged"])
+            except OSError:
+                pass
+        STATE.batch = []
+    return {"ok": True}
+
+
+def batch_apply():
+    """应用暂存区里的全部文件（每个归档只写一次）。"""
+    with STATE.lock:
+        items = list(STATE.batch)
+    if not items:
+        raise ApiError("暂存区是空的，请先选择文件夹")
+    # 按 归档 -> 条目 汇总
+    by_game = {}
+    for it in items:
+        if it["kind"] == "unknown":
+            continue
+        by_game.setdefault(it["game"], []).append(it)
+
+    report = {"texture": 0, "dialogue": 0, "raw": 0, "musiccmt": 0,
+              "unknown": 0, "changed_lines": 0, "bad_chars": [],
+              "unmatched": 0, "errors": []}
+    for it in items:
+        if it["kind"] == "unknown":
+            report["unknown"] += 1
+
+    for key, group in by_game.items():
+        a = STATE.archive(key)
+        encoding = GAMES[key]["encoding"]
+        replacements = {}
+        # ---- 贴图：先合并到各自的 ANM ----
+        anm_cache = {}
+        for it in group:
+            if it["kind"] != "texture":
+                continue
+            try:
+                with open(it["staged"], "rb") as f:
+                    png = f.read()
+                cache_key = it["target"]
+                if cache_key not in anm_cache:
+                    anm_cache[cache_key] = anm.AnmFile.from_bytes(
+                        a.read_by_name(cache_key))
+                f_anm = anm_cache[cache_key]
+                tex = None
+                for t in f_anm.textures:
+                    if t.entry_index == it["index"]:
+                        tex = t
+                        break
+                if tex is None:
+                    report["errors"].append("%s: 没有 #%d 号贴图"
+                                            % (it["file"], it["index"]))
+                    continue
+                from PIL import Image
+                import numpy as np
+                img = Image.open(io.BytesIO(png)).convert("RGBA")
+                encoded = anm.encode_rgba(tex.format, np.array(img))
+                f_anm.replace_texture(tex, encoded, img.width, img.height)
+                replacements[it["target"]] = f_anm.to_bytes()
+                report["texture"] += 1
+            except Exception as ex:
+                report["errors"].append("%s: %s" % (it["file"], ex))
+        # ---- 对话文档 ----
+        for it in group:
+            if it["kind"] != "dialogue":
+                continue
+            try:
+                with io.open(it["staged"], "r", encoding="utf-8-sig",
+                             errors="replace") as f:
+                    text = f.read()
+                name = it["target"]
+                base = replacements.get(name)
+                f_msg = msg.MsgFile.from_bytes(
+                    base if base else a.read_by_name(name), encoding)
+                changed, unmatched, bad, _changes = msg.import_document(
+                    text, f_msg, encoding)
+                if changed:
+                    replacements[name] = f_msg.to_bytes()
+                report["dialogue"] += 1
+                report["changed_lines"] += changed
+                report["unmatched"] += len(unmatched)
+                for ch in bad:
+                    if ch not in report["bad_chars"]:
+                        report["bad_chars"].append(ch)
+            except Exception as ex:
+                report["errors"].append("%s: %s" % (it["file"], ex))
+        # ---- 音乐室评论 ----
+        for it in group:
+            if it["kind"] != "musiccmt":
+                continue
+            try:
+                with io.open(it["staged"], "r", encoding="utf-8-sig",
+                             errors="replace") as f:
+                    text = f.read()
+                replacements["musiccmt.txt"] = text.encode(encoding,
+                                                           "replace")
+                report["musiccmt"] += 1
+            except Exception as ex:
+                report["errors"].append("%s: %s" % (it["file"], ex))
+        # ---- 原样替换 ----
+        for it in group:
+            if it["kind"] != "raw":
+                continue
+            try:
+                with open(it["staged"], "rb") as f:
+                    replacements[it["target"]] = f.read()
+                report["raw"] += 1
+            except Exception as ex:
+                report["errors"].append("%s: %s" % (it["file"], ex))
+        # ---- 一次性写入归档 ----
+        if replacements:
+            path = STATE.archive_path(key)
+            ensure_backup(path)
+            idx_map = {}
+            for name in replacements:
+                i = a.index_of(name)
+                if i >= 0:
+                    idx_map[i] = replacements[name]
+            a.save_patched(path, idx_map)
+            STATE.anm_cache = {}
+    log("批量导入", "共 %d 个文件" % len(items),
+        "贴图 %d / 对话 %d / 原样 %d / 评论 %d / 未识别 %d"
+        % (report["texture"], report["dialogue"], report["raw"],
+           report["musiccmt"], report["unknown"]))
+    batch_clear()
+    report["ok"] = True
+    return report
 
 
 def list_backups():
@@ -929,6 +1199,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, data, "text/plain; charset=utf-8",
                               {"Content-Disposition":
                                "attachment; filename*=UTF-8''%s" % fname})
+        if route == "batch":
+            return self._json(batch_list())
         if route == "musiccmt":
             return self._json(get_musiccmt(q.get("game", "jp")))
         if route == "backups":
@@ -970,10 +1242,25 @@ class Handler(BaseHTTPRequestHandler):
                 text = body.decode("utf-8-sig", "replace")
                 return self._json(msg_import_document(
                     q.get("game", "jp"), q.get("name", ""), text))
+            if route == "msg.preview":
+                text = body.decode("utf-8-sig", "replace")
+                return self._json(msg_import_document(
+                    q.get("game", "jp"), q.get("name", ""), text,
+                    dry_run=True))
             if route == "logs.clear":
                 LOG.clear()
                 log("清空日志")
                 return self._json({"ok": True})
+            if route == "batch.add":
+                return self._json(batch_add(
+                    q.get("game", STATE.game_key), q.get("name", "file"),
+                    body))
+            if route == "batch.apply":
+                return self._json(batch_apply())
+            if route == "batch.clear":
+                return self._json(batch_clear())
+            if route == "batch.remove":
+                return self._json(batch_remove(int(q.get("id", "0"))))
             if route == "musiccmt":
                 payload = json.loads(body.decode("utf-8") or "{}")
                 return self._json(save_musiccmt(
