@@ -282,7 +282,9 @@ class AnmFile(object):
         # 条目 = 原条目 [0, thtxoffset) + 新 THTX
         entry_prefix = data[pos:thtx]
         new_entry = bytes(entry_prefix) + bytes(new_thtx)
-        new_next = len(new_entry)
+        # 注意：链表中最后一条的 nextoffset 必须保持 0，
+        # 否则游戏会沿链走过文件末尾读到垃圾数据（表现为进关卡崩溃）
+        new_next = len(new_entry) if old_next else 0
 
         # 组装文件：替换该条目，其后内容整体前移/后移
         if old_next:
@@ -324,6 +326,57 @@ class AnmFile(object):
 
     def to_bytes(self):
         return self.data
+
+    # ------------------------------------------------------------------
+    # 结构自检
+    # ------------------------------------------------------------------
+    def validate(self):
+        """检查条目链是否合法（末尾必须是 nextoffset == 0）。
+
+        返回问题描述列表，空列表表示没问题。
+        """
+        problems = []
+        data = self.data
+        n = len(data)
+        pos = 0
+        seen = set()
+        index = 0
+        while True:
+            if pos in seen:
+                problems.append("条目链出现环: offset %d" % pos)
+                break
+            seen.add(pos)
+            if pos + HEADER_SIZE > n:
+                problems.append("条目 %d 头部超出文件末尾 (offset %d)"
+                                % (index, pos))
+                break
+            version = struct.unpack_from("<I", data, pos)[0]
+            if version not in (0, 2, 3, 4, 7, 8):
+                problems.append("条目 %d 的 version 非法: %d" % (index, version))
+                break
+            thtxoffset = struct.unpack_from("<I", data, pos + 0x1C)[0]
+            nextoffset = struct.unpack_from("<I", data, pos + 0x24)[0]
+            hasdata = struct.unpack_from("<H", data, pos + 0x20)[0]
+            if hasdata and thtxoffset:
+                if pos + thtxoffset + THTX_SIZE > n:
+                    problems.append("条目 %d 的 THTX 偏移越界" % index)
+                    break
+                magic, zero, fmt, w, h, size = struct.unpack_from(
+                    "<4sHHHHI", data, pos + thtxoffset)
+                if magic != b"THTX":
+                    problems.append("条目 %d 的 THTX 魔数错误: %r"
+                                    % (index, magic))
+                need = w * h * FORMAT_BPP.get(fmt, 0)
+                if need and size < need:
+                    problems.append("条目 %d 贴图数据不足: %d < %d"
+                                    % (index, size, need))
+                if pos + thtxoffset + THTX_SIZE + size > n:
+                    problems.append("条目 %d 贴图数据超出文件末尾" % index)
+            if not nextoffset:
+                break
+            pos += nextoffset
+            index += 1
+        return problems
 
 
 def composed_size(textures):

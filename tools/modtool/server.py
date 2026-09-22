@@ -404,6 +404,10 @@ def replace_texture(key, anm_name, index, png_data):
     rgba = np.array(img)
     encoded = anm.encode_rgba(t.format, rgba)
     new_texture = f.replace_texture(t, encoded, img.width, img.height)
+    problems = f.validate()
+    if problems:
+        raise ApiError("贴图重建后结构异常，已放弃写入: %s"
+                       % "；".join(problems[:3]))
     save_archive_entry(
         key, anm_name, f.to_bytes(), action="替换贴图",
         detail="%s #%d %dx%d %s" % (t.name, t.entry_index,
@@ -1152,6 +1156,18 @@ def batch_apply():
             except Exception as ex:
                 report["errors"].append("%s: %s" % (it["file"], ex))
         # ---- 一次性写入归档 ----
+        if replacements:
+            # 写盘前自检：任何 ANM 结构异常都拒绝保存
+            for name, blob in replacements.items():
+                if name.lower().endswith(".anm"):
+                    problems = anm.AnmFile.from_bytes(blob).validate()
+                    if problems:
+                        report["errors"].append(
+                            "%s 结构异常，已跳过: %s"
+                            % (name, "；".join(problems[:2])))
+                        replacements[name] = None
+            replacements = {k: v for k, v in replacements.items()
+                            if v is not None}
         if replacements:
             path = STATE.archive_path(key)
             ensure_backup(path)
