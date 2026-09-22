@@ -18,8 +18,8 @@
   <div class="game-switch">
     <label>游戏版本</label>
     <select id="game-select"></select>
-    <button id="btn-launch" class="primary" title="启动游戏">&#9654; 启动游戏</button>
-    <button id="btn-settings" title="设置游戏目录">&#9881; 设置目录</button>
+    <button id="btn-launch" class="btn-primary" title="启动游戏">&#9654;&nbsp;启动游戏</button>
+    <button id="btn-settings" title="设置游戏目录">&#9881;&nbsp;设置目录</button>
     <span id="pending-badge" class="badge hidden"></span>
   </div>
 </header>
@@ -52,13 +52,14 @@
   <button data-tab="log">日志</button>
   <button data-tab="backup">备份 / 还原</button>
 </nav>
-
 <main>
   <!-- ======================= 贴图 ======================= -->
   <section id="tab-texture" class="tab active">
     <aside class="side">
       <div class="side-head">
-        <input id="anm-filter" type="text" placeholder="筛选 .anm …">
+        <input id="tex-search" type="search"
+               placeholder="搜索贴图名，如 etama、face02no…">
+        <div class="side-hint" id="side-hint">按文件名浏览，或输入关键词全局搜索</div>
       </div>
       <ul id="anm-list" class="list"></ul>
     </aside>

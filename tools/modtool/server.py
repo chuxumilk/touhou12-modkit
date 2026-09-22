@@ -790,7 +790,7 @@ def _index_cache_path(key):
     """贴图索引缓存文件路径（用 .dat 的大小+时间戳做版本号）。"""
     dat = STATE.archive_path(key)
     st = os.stat(dat)
-    return os.path.join(STAGING_DIR, "texindex_%s_%d_%d.json"
+    return os.path.join(STAGING_DIR, "texindex_v2_%s_%d_%d.json"
                         % (key, st.st_size, int(st.st_mtime)))
 
 
@@ -829,6 +829,7 @@ def _texture_index(key):
             base = t.name.rsplit("/", 1)[-1].lower()
             index.setdefault(base, []).append({
                 "anm": e.name, "index": t.entry_index,
+                "name": t.name, "format": t.format_name,
                 "w": t.width, "h": t.height, "x": t.x, "y": t.y,
             })
     with STATE.lock:
@@ -837,7 +838,7 @@ def _texture_index(key):
     if cache_path:
         try:
             for old in os.listdir(STAGING_DIR):
-                if old.startswith("texindex_%s_" % key) and \
+                if old.startswith("texindex_") and \
                         os.path.join(STAGING_DIR, old) != cache_path:
                     os.remove(os.path.join(STAGING_DIR, old))
             with io.open(cache_path, "w", encoding="utf-8") as f:
@@ -845,6 +846,37 @@ def _texture_index(key):
         except OSError:
             pass
     return index
+
+
+def search_textures(key, query, limit=400):
+    """按贴图名 / 路径 / ANM 名全局搜索贴图。"""
+    query = (query or "").strip().lower()
+    if not query:
+        return {"query": query, "total": 0, "results": []}
+    index = _texture_index(key)
+    results = []
+    for items in index.values():
+        for it in items:
+            haystack = "%s %s" % (it["name"].lower(), it["anm"].lower())
+            if query in haystack:
+                results.append(it)
+    # 名字开头命中的排前面
+    results.sort(key=lambda it: (
+        not it["name"].lower().rsplit("/", 1)[-1].startswith(query),
+        it["anm"], it["index"]))
+    return {"query": query, "total": len(results),
+            "results": results[:limit]}
+
+
+def list_anm_files(key):
+    """列出归档里所有 .anm 及其贴图数量。"""
+    a = STATE.archive(key)
+    out = []
+    for e in a.entries:
+        if not e.name.lower().endswith(".anm"):
+            continue
+        out.append({"name": e.name, "size": e.size})
+    return {"anms": out}
 
 
 def warm_up_texture_index():
@@ -1326,6 +1358,11 @@ class Handler(BaseHTTPRequestHandler):
         if route == "textures":
             return self._json(list_textures(q.get("game", "jp"),
                                             q.get("anm", "")))
+        if route == "textures.search":
+            return self._json(search_textures(q.get("game", "jp"),
+                                              q.get("q", "")))
+        if route == "anms":
+            return self._json(list_anm_files(q.get("game", "jp")))
         if route == "texture.png":
             data = texture_png(q.get("game", "jp"), q.get("anm", ""),
                                int(q.get("index", "0")))

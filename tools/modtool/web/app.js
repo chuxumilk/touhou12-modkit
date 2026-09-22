@@ -6,6 +6,7 @@ const S = {
   entries: [],
   anmName: null,
   textures: [],
+  searchMode: false,
   msgName: null,
   msgData: null,
   bgm: null,
@@ -210,11 +211,9 @@ async function loadArchive() {
 }
 
 function renderAnmList() {
-  const filter = $("#anm-filter").value.trim().toLowerCase();
   const ul = $("#anm-list");
   ul.innerHTML = "";
-  S.entries.filter((e) => e.name.endsWith(".anm") &&
-      (!filter || e.name.toLowerCase().includes(filter)))
+  S.entries.filter((e) => e.name.endsWith(".anm"))
     .forEach((e) => {
       const li = document.createElement("li");
       li.innerHTML = `<span>${e.name}</span>
@@ -226,11 +225,104 @@ function renderAnmList() {
     });
 }
 
-$("#anm-filter").oninput = renderAnmList;
+/* ---------------- 贴图全局搜索 ---------------- */
+let texSearchTimer = null;
+
+function onTexSearchInput() {
+  clearTimeout(texSearchTimer);
+  const q = $("#tex-search").value.trim();
+  texSearchTimer = setTimeout(() => doTexSearch(q), 220);
+}
+
+async function doTexSearch(q) {
+  const ul = $("#anm-list");
+  if (!q) {
+    S.searchMode = false;
+    $("#side-hint").textContent = "按文件名浏览，或输入关键词全局搜索";
+    renderAnmList();
+    if (!S.anmName) {
+      $("#texture-title").textContent = "请选择左侧的贴图文件";
+      $("#texture-grid").innerHTML = "";
+      $("#texture-count").textContent = "";
+    } else {
+      openAnm(S.anmName);
+    }
+    return;
+  }
+  S.searchMode = true;
+  $("#side-hint").textContent = "正在搜索…";
+  try {
+    const data = await api(
+      `/api/textures.search?game=${S.game}&q=${encodeURIComponent(q)}`);
+    $("#side-hint").textContent =
+      `找到 ${data.total} 张（显示前 ${data.results.length} 张）`;
+    // 左侧：按 ANM 归类
+    const byAnm = {};
+    data.results.forEach((r) => {
+      (byAnm[r.anm] = byAnm[r.anm] || []).push(r);
+    });
+    ul.innerHTML = "";
+    Object.keys(byAnm).sort().forEach((anm) => {
+      const head = document.createElement("li");
+      head.className = "list-head";
+      head.textContent = `${anm}（${byAnm[anm].length}）`;
+      ul.appendChild(head);
+      byAnm[anm].forEach((r) => {
+        const li = document.createElement("li");
+        li.innerHTML = `<span>${r.name}</span>
+          <span class="size">#${r.index} ${r.w}×${r.h}</span>`;
+        li.onclick = () => {
+          $$("#anm-list li").forEach((el) => el.classList.remove("active"));
+          li.classList.add("active");
+          showSearchResult(r, li);
+        };
+        ul.appendChild(li);
+      });
+    });
+    if (!data.results.length) {
+      ul.innerHTML = '<li class="list-empty">没有匹配的贴图</li>';
+    }
+    // 右侧：直接展示所有命中
+    $("#texture-title").textContent = `搜索「${q}」`;
+    $("#texture-count").textContent = `共 ${data.total} 张`;
+    renderTextureCards(data.results.map((r) => ({
+      index: r.index, name: r.name, width: r.w, height: r.h,
+      format_name: r.format, size: 0, anm: r.anm,
+    })));
+  } catch (ex) {
+    $("#side-hint").textContent = "搜索失败: " + ex.message;
+  }
+}
+
+function showSearchResult(r, li) {
+  S.anmName = r.anm;
+  $("#texture-title").textContent = `${r.anm} — ${r.name}`;
+  $("#texture-count").textContent = `#${r.index} · ${r.w}×${r.h} · ${r.format}`;
+  renderTextureCards([{
+    index: r.index, name: r.name, width: r.w, height: r.h,
+    format_name: r.format, size: 0, anm: r.anm,
+  }]);
+}
+
+$("#tex-search").oninput = onTexSearchInput;
+$("#tex-search").onsearch = () => doTexSearch($("#tex-search").value.trim());
+$("#tex-search").onkeydown = (ev) => {
+  if (ev.key === "Escape") {
+    $("#tex-search").value = "";
+    doTexSearch("");
+  }
+};
 
 /* ---------------- 贴图 ---------------- */
 async function openAnm(name, li) {
   S.anmName = name;
+  S.searchMode = false;
+  const box = $("#tex-search");
+  if (box.value) {
+    box.value = "";
+    $("#side-hint").textContent = "按文件名浏览，或输入关键词全局搜索";
+    renderAnmList();
+  }
   $$("#anm-list li").forEach((el) => el.classList.remove("active"));
   if (li) li.classList.add("active");
   $("#texture-title").textContent = name;
@@ -239,33 +331,41 @@ async function openAnm(name, li) {
   try {
     const data = await api(
       `/api/textures?game=${S.game}&anm=${encodeURIComponent(name)}`);
-    S.textures = data.textures;
-    $("#texture-count").textContent =
-      `共 ${data.textures.length} 张贴图`;
-    renderTextures();
+    S.textures = data.textures.map((t) => Object.assign({ anm: name }, t));
+    $("#texture-count").textContent = `共 ${data.textures.length} 张贴图`;
+    renderTextureCards(S.textures);
   } catch (ex) {
     grid.innerHTML = "";
     toast("解析失败: " + ex.message, true);
   }
 }
 
-function renderTextures() {
+function renderTextureCards(list) {
   const grid = $("#texture-grid");
   grid.innerHTML = "";
-  S.textures.forEach((t) => {
+  if (!list.length) {
+    grid.innerHTML = '<p class="muted" style="padding:8px">没有贴图</p>';
+    return;
+  }
+  list.forEach((t) => {
+    const anmName = t.anm || S.anmName;
     const card = document.createElement("div");
     card.className = "card";
     card.dataset.index = t.index;
     const url = `/api/texture.png?game=${S.game}` +
-      `&anm=${encodeURIComponent(S.anmName)}&index=${t.index}`;
+      `&anm=${encodeURIComponent(anmName)}&index=${t.index}`;
+    const meta = [`#${t.index}`, `${t.width}×${t.height}`,
+      t.format_name || t.format];
+    if (t.size) meta.push(fmtSize(t.size));
     card.innerHTML = `
       <div class="thumb"><img loading="lazy" src="${url}" alt=""></div>
       <div class="name" title="${t.name}">${t.name || "(无名)"}</div>
-      <div class="meta">#${t.index} · ${t.width}×${t.height} ·
-        ${t.format_name} · ${fmtSize(t.size)}</div>
+      <div class="meta">${meta.join(" · ")}</div>
+      ${anmName !== S.anmName || S.searchMode
+        ? `<div class="meta anm-tag">${anmName}</div>` : ""}
       <div class="btns">
         <button class="mini" data-act="replace">替换</button>
-        <button class="mini" data-act="download">导出 PNG</button>
+        <button class="mini" data-act="download">导出</button>
       </div>`;
     card.querySelector(".thumb").onclick = () => {
       $("#lightbox-img").src = url;
@@ -274,34 +374,37 @@ function renderTextures() {
     card.querySelector('[data-act="download"]').onclick = () => {
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${S.anmName}_${t.index}.png`;
+      a.download = `${anmName}_${t.index}.png`;
       a.click();
     };
     card.querySelector('[data-act="replace"]').onclick =
-      () => replaceTexture(t);
+      () => replaceTexture(t, anmName);
     grid.appendChild(card);
   });
 }
 
-async function replaceTexture(t) {
+async function replaceTexture(t, anmName) {
+  anmName = anmName || t.anm || S.anmName;
   const file = await pickFile("image/png,image/*");
   if (!file) return;
   try {
     const buf = await file.arrayBuffer();
     const res = await api(
-      `/api/texture?game=${S.game}&anm=${encodeURIComponent(S.anmName)}` +
+      `/api/texture?game=${S.game}&anm=${encodeURIComponent(anmName)}` +
       `&index=${t.index}`,
       { method: "POST", body: buf });
     toast(`已替换 ${t.name} (${res.width}×${res.height})`);
-    // 刷新缩略图（加时间戳避免缓存）
     const card = document.querySelector(`.card[data-index="${t.index}"]`);
     if (card) {
       const img = card.querySelector("img");
       img.src = `/api/texture.png?game=${S.game}` +
-        `&anm=${encodeURIComponent(S.anmName)}&index=${t.index}&t=${Date.now()}`;
+        `&anm=${encodeURIComponent(anmName)}&index=${t.index}` +
+        `&t=${Date.now()}`;
     }
-    // 尺寸变了就整体刷新
-    if (res.width !== t.width || res.height !== t.height) openAnm(S.anmName);
+    if (res.width !== t.width || res.height !== t.height) {
+      if (S.searchMode) doTexSearch($("#tex-search").value.trim());
+      else openAnm(anmName);
+    }
   } catch (ex) {
     toast("替换失败: " + ex.message, true);
   }
