@@ -946,28 +946,50 @@ async function loadBackups() {
     tbody.innerHTML = "";
     if (!data.backups.length) {
       tbody.innerHTML =
-        '<tr><td colspan="4" class="muted">还没有备份（第一次修改时会自动创建）</td></tr>';
+        '<tr><td colspan="5" class="muted">还没有备份（第一次修改文件时会自动创建）</td></tr>';
       return;
     }
     data.backups.forEach((b) => {
       const tr = document.createElement("tr");
+      const state = b.modified
+        ? `<span class="pill warn">已修改</span>
+           <span class="muted">${b.current_size_text} · ${b.current_time_text}</span>`
+        : `<span class="pill ok">与备份一致</span>`;
       tr.innerHTML = `
-        <td>${b.name}</td>
+        <td>${b.target}<div class="muted">${b.name}</div></td>
         <td>${b.size_text}</td>
-        <td>${b.time_text}</td>
-        <td><button class="mini" data-act="restore">还原</button></td>`;
+        <td>${b.time_text}
+          <div class="muted" title="源文件自身的时间戳">原始: ${b.source_time_text}</div></td>
+        <td>${state}</td>
+        <td><div class="row-actions">
+          <button class="mini" data-act="restore">还原</button>
+          <button class="mini" data-act="download">下载备份</button>
+        </div></td>`;
       tr.querySelector('[data-act="restore"]').onclick = async () => {
-        if (!confirm(`确定用备份还原「${b.name}」吗？当前修改会丢失。`)) return;
+        const extra = b.modified
+          ? `\n\n当前文件（${b.current_size_text}，${b.current_time_text}）`
+            + `与备份不同，还原后会变成备份的样子。\n`
+            + `当前版本会自动存为 ${b.target}.modtool.prev（可再改回来）。`
+          : "\n\n当前文件与备份一致，还原不会改变内容。";
+        if (!confirm(`用备份还原「${b.target}」吗？${extra}`)) return;
         try {
           await api(`/api/restore?key=${b.key}`, { method: "POST" });
-          toast("已还原 " + b.name);
-          S.anmName = null; S.msgName = null;
+          toast(`已还原 ${b.target}`);
+          S.anmName = null;
+          S.msgName = null;
           await loadArchive();
           await loadBgm();
           await loadMusiccmt();
+          await loadBackups();
         } catch (ex) {
           toast("还原失败: " + ex.message, true);
         }
+      };
+      tr.querySelector('[data-act="download"]').onclick = () => {
+        const a = document.createElement("a");
+        a.href = `/api/backup.download?key=${b.key}`;
+        a.download = b.name;
+        a.click();
       };
       tbody.appendChild(tr);
     });
@@ -975,6 +997,26 @@ async function loadBackups() {
     toast("读取备份失败: " + ex.message, true);
   }
 }
+
 $("#backup-refresh").onclick = loadBackups;
+$("#backup-restore-all").onclick = async () => {
+  if (!confirm("确定把日文版 / 汉化版 / 音乐全部还原成备份吗？\n\n"
+    + "当前版本会自动存为 *.modtool.prev，可以再找回来。")) return;
+  try {
+    const res = await api("/api/restore.all", { method: "POST" });
+    toast("已还原: " + (res.restored.join(" / ") || "无"));
+    if (res.errors && res.errors.length) {
+      toast("部分失败: " + res.errors.join("；"), true);
+    }
+    S.anmName = null;
+    S.msgName = null;
+    await loadArchive();
+    await loadBgm();
+    await loadMusiccmt();
+    await loadBackups();
+  } catch (ex) {
+    toast("还原失败: " + ex.message, true);
+  }
+};
 
 boot().catch((ex) => toast("初始化失败: " + ex.message, true));

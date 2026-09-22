@@ -1220,34 +1220,50 @@ def batch_apply():
     return report
 
 
+def _fmt_time(ts):
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+    except (OSError, ValueError, OverflowError):
+        return "-"
+
+
 def list_backups():
+    """列出备份及其与当前文件的差异。"""
+    items = [("jp", STATE.archive_path("jp")),
+             ("cn", STATE.archive_path("cn")),
+             ("bgm", BGM_DAT)]
     out = []
-    for key in GAMES:
-        path = STATE.archive_path(key)
-        bak = path + BACKUP_SUFFIX
-        if os.path.exists(bak):
-            out.append({
-                "key": key, "path": bak,
-                "name": os.path.basename(bak),
-                "size": os.path.getsize(bak),
-                "time": os.path.getmtime(bak),
-            })
-    bak = BGM_DAT + BACKUP_SUFFIX
-    if os.path.exists(bak):
+    for key, target in items:
+        bak = target + BACKUP_SUFFIX
+        if not os.path.exists(bak):
+            continue
+        st = os.stat(bak)
+        # copy2 会保留源文件时间，所以“备份时间”取创建时间
+        created = st.st_ctime if st.st_ctime > st.st_mtime else st.st_mtime
+        cur_size = os.path.getsize(target) if os.path.exists(target) else 0
+        cur_mtime = os.path.getmtime(target) if os.path.exists(target) else 0
+        # 时间或大小任一不同都算“备份后被改过”
+        changed = bool(cur_mtime) and (
+            cur_mtime > created + 1 or cur_size != st.st_size)
         out.append({
-            "key": "bgm", "path": bak,
+            "key": key,
             "name": os.path.basename(bak),
-            "size": os.path.getsize(bak),
-            "time": os.path.getmtime(bak),
+            "target": os.path.basename(target),
+            "size": st.st_size,
+            "size_text": human_size(st.st_size),
+            "created": created,
+            "time_text": _fmt_time(created),
+            "source_time_text": _fmt_time(st.st_mtime),
+            "current_size": cur_size,
+            "current_size_text": human_size(cur_size),
+            "current_time_text": _fmt_time(cur_mtime) if cur_mtime else "-",
+            "modified": changed,
         })
-    for item in out:
-        item["size_text"] = human_size(item["size"])
-        item["time_text"] = time.strftime(
-            "%Y-%m-%d %H:%M:%S", time.localtime(item["time"]))
     return {"backups": out}
 
 
 def restore_backup(which):
+    """把备份写回游戏。还原前会先把当前文件另存为 .modtool.prev。"""
     mapping = {
         "jp": STATE.archive_path("jp"),
         "cn": STATE.archive_path("cn"),
@@ -1258,12 +1274,36 @@ def restore_backup(which):
     target = mapping[which]
     bak = target + BACKUP_SUFFIX
     if not os.path.exists(bak):
-        raise ApiError("备份不存在", 404)
+        raise ApiError("备份不存在（%s 还没有生成过备份）"
+                       % os.path.basename(target), 404)
     with STATE.lock:
+        if os.path.exists(target):
+            # 还原前保留当前状态，避免手滑丢失改动
+            try:
+                shutil.copy2(target, target + ".modtool.prev")
+            except OSError:
+                pass
         shutil.copy2(bak, target)
         STATE.invalidate()
-    log("还原备份", os.path.basename(bak), os.path.basename(target))
-    return {"ok": True}
+    log("还原备份", os.path.basename(bak),
+        "-> %s（原文件已存为 .modtool.prev）" % os.path.basename(target))
+    return {"ok": True, "target": os.path.basename(target),
+            "prev": os.path.basename(target) + ".modtool.prev"}
+
+
+def restore_all():
+    """一键把所有备份写回（保证各文件之间状态一致）。"""
+    done = []
+    errors = []
+    for key in ("jp", "cn", "bgm"):
+        try:
+            restore_backup(key)
+            done.append(key)
+        except ApiError as ex:
+            errors.append("%s: %s" % (key, ex))
+        except PermissionError:
+            errors.append("%s: 文件被占用（请先关闭游戏）" % key)
+    return {"ok": True, "restored": done, "errors": errors}
 
 
 # ----------------------------------------------------------------------
@@ -1409,6 +1449,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(get_musiccmt(q.get("game", "jp")))
         if route == "backups":
             return self._json(list_backups())
+        if route == "backup.download":
+            which = q.get("key", "")
+            mapping = {"jp": STATE.archive_path("jp"),
+                       "cn": STATE.archive_path("cn"),
+                       "bgm": BGM_DAT}
+            if which not in mapping:
+                raise ApiError("未知备份: %s" % which, 404)
+            bak = mapping[which] + BACKUP_SUFFIX
+            if not os.path.isfile(bak):
+                raise ApiError("备份不存在", 404)
+            with open(bak, "rb") as f:
+                data = f.read()
+            fname = urllib.parse.quote(os.path.basename(bak))
+            return self._send(200, data, "application/octet-stream",
+                              {"Content-Disposition":
+                               "attachment; filename*=UTF-8''%s" % fname})
         if route == "config":
             return self._json(get_config())
         raise ApiError("未知接口: %s" % route, 404)
@@ -1471,6 +1527,8 @@ class Handler(BaseHTTPRequestHandler):
                     q.get("game", "jp"), payload.get("text", "")))
             if route == "restore":
                 return self._json(restore_backup(q.get("key", "")))
+            if route == "restore.all":
+                return self._json(restore_all())
             if route == "config":
                 payload = json.loads(body.decode("utf-8") or "{}")
                 return self._json(set_config(payload))

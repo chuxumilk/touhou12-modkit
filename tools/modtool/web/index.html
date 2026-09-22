@@ -204,12 +204,22 @@
     <div class="content wide">
       <div class="content-head">
         <h2>备份 / 还原</h2>
-        <button id="backup-refresh">刷新</button>
+        <div class="actions">
+          <button id="backup-restore-all" class="btn-primary">全部还原</button>
+          <button id="backup-refresh">刷新</button>
+        </div>
       </div>
-      <p class="hint">工具在第一次修改某个文件前会自动生成
-        <code>*.modtool.bak</code>（保留最原始的版本）。点“还原”会把备份写回游戏。</p>
+      <p class="hint">工具在**第一次**修改某个文件前会自动生成
+        <code>*.modtool.bak</code>（保留最原始的版本，之后不再覆盖）。<br>
+        「备份时间」是备份生成的时间；「当前状态」显示游戏文件是否在备份之后被改过。
+        还原前会把当前文件另存为 <code>*.modtool.prev</code>，误点也能找回来。<br>
+        ⚠ 日文版/汉化版共用一个 <code>thbgm.dat</code>，如果改过音乐，
+        建议用「全部还原」保持三个文件状态一致。</p>
       <table class="table" id="backup-table">
-        <thead><tr><th>文件</th><th>大小</th><th>备份时间</th><th>操作</th></tr></thead>
+        <thead>
+          <tr><th>文件</th><th>备份大小</th><th>备份时间</th>
+              <th>当前状态</th><th>操作</th></tr>
+        </thead>
         <tbody></tbody>
       </table>
     </div>
