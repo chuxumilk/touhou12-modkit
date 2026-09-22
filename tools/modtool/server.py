@@ -249,6 +249,7 @@ class State(object):
         self.lock = threading.RLock()
         self.archives = {}
         self.anm_cache = {}
+        self.texture_index = {}
         self.fmt = None
         self.bgm_pending = {}     # index -> 暂存的 PCM 文件路径
         self.bgm_loop = {}        # index -> 新的循环点（字节）
@@ -295,6 +296,7 @@ class State(object):
     def invalidate(self):
         with self.lock:
             self.anm_cache = {}
+            self.texture_index = {}
             self.archives = {}
             self.fmt = None
 
@@ -349,6 +351,7 @@ def save_archive_entry(key, name, data, action="写入归档文件", detail=""):
         ensure_backup(path)
         a.save_patched(path, {idx: data})
         STATE.anm_cache = {}
+        STATE.texture_index = {}
     log(action, "%s / %s" % (GAMES[key]["label"], name),
         detail or human_size(len(data)))
     return {"ok": True, "name": name, "size": len(data)}
@@ -772,31 +775,143 @@ BATCH_TEXTURE_ALT_RE = re.compile(
     r"^(?P<name>.*)@(?P<anm>[^@]+)@(?P<idx>\d+)\.png$", re.IGNORECASE)
 
 
-def _batch_classify(key, filename, size):
+def _png_size(data):
+    """从 PNG 头部读尺寸（不依赖 PIL）。"""
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    return struct.unpack_from(">II", data, 16)
+
+
+def _index_cache_path(key):
+    """贴图索引缓存文件路径（用 .dat 的大小+时间戳做版本号）。"""
+    dat = STATE.archive_path(key)
+    st = os.stat(dat)
+    return os.path.join(STAGING_DIR, "texindex_%s_%d_%d.json"
+                        % (key, st.st_size, int(st.st_mtime)))
+
+
+def _texture_index(key):
+    """构建 贴图名(小写) -> [匹配项] 的索引（内存 + 磁盘缓存）。
+
+    匹配项形如 ``{"anm": ..., "index": ..., "w":..., "h":..., "x":..., "y":...}``
+    """
+    with STATE.lock:
+        cached = STATE.texture_index.get(key)
+    if cached is not None:
+        return cached
+    # 磁盘缓存（游戏文件没变就直接用）
+    cache_path = None
+    try:
+        cache_path = _index_cache_path(key)
+        if os.path.isfile(cache_path):
+            with io.open(cache_path, "r", encoding="utf-8") as f:
+                index = json.load(f)
+            with STATE.lock:
+                STATE.texture_index[key] = index
+            return index
+    except Exception:
+        cache_path = None
+
+    a = STATE.archive(key)
+    index = {}
+    for e in a.entries:
+        if not e.name.lower().endswith(".anm"):
+            continue
+        try:
+            f = STATE.anm(key, e.name)
+        except Exception:
+            continue
+        for t in f.textures:
+            base = t.name.rsplit("/", 1)[-1].lower()
+            index.setdefault(base, []).append({
+                "anm": e.name, "index": t.entry_index,
+                "w": t.width, "h": t.height, "x": t.x, "y": t.y,
+            })
+    with STATE.lock:
+        STATE.texture_index[key] = index
+    # 写磁盘缓存，并清掉旧版本
+    if cache_path:
+        try:
+            for old in os.listdir(STAGING_DIR):
+                if old.startswith("texindex_%s_" % key) and \
+                        os.path.join(STAGING_DIR, old) != cache_path:
+                    os.remove(os.path.join(STAGING_DIR, old))
+            with io.open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(index, f, ensure_ascii=False)
+        except OSError:
+            pass
+    return index
+
+
+def warm_up_texture_index():
+    """启动后在后台预热贴图索引（顺便缓存 ANM 解析结果）。"""
+    for key in STATE.available_games():
+        try:
+            _texture_index(key)
+        except Exception:
+            pass
+
+
+def _classify_png(key, base, data):
+    """识别一张 PNG：显式序号 → 贴图名 → 合成图。"""
+    a = STATE.archive(key)
+    m = BATCH_TEXTURE_RE.match(base) or BATCH_TEXTURE_ALT_RE.match(base)
+    if m and m.groupdict().get("idx") is not None:
+        anm_name = m.group("anm")
+        idx = int(m.group("idx"))
+        for cand in (anm_name, anm_name + ".anm"):
+            if a.index_of(cand) >= 0:
+                return {"kind": "texture", "target": cand, "index": idx,
+                        "matches": [{"anm": cand, "index": idx}],
+                        "mode": "single",
+                        "detail": "贴图 #%d" % idx}
+    # 按“贴图名”匹配（支持合成图）
+    matches = _texture_index(key).get(base.lower())
+    if not matches:
+        return None
+    size = _png_size(data)
+    # 先按 ANM 分组，看有没有整组刚好等于合成图尺寸
+    groups = {}
+    for item in matches:
+        groups.setdefault(item["anm"], []).append(item)
+    if size:
+        for anm_name, group in groups.items():
+            cw = max(x["x"] + x["w"] for x in group)
+            ch = max(x["y"] + x["h"] for x in group)
+            if (cw, ch) == size:
+                detail = "合成图 %dx%d → %s（%d 张）" % (
+                    cw, ch, anm_name, len(group))
+                return {"kind": "texture", "target": anm_name, "index": None,
+                        "matches": group, "mode": "composed",
+                        "detail": detail}
+        exact = [x for x in matches if (x["w"], x["h"]) == size]
+        if exact:
+            target = exact[0]
+            detail = "%s #%d" % (target["anm"], target["index"])
+            if len(exact) > 1:
+                detail += "（另有 %d 张同尺寸同名）" % (len(exact) - 1)
+            return {"kind": "texture", "target": target["anm"],
+                    "index": target["index"], "matches": [target],
+                    "mode": "single", "detail": detail}
+    # 尺寸都不符：取最大的一组，按缩放替换
+    best = max(matches, key=lambda x: x["w"] * x["h"])
+    return {"kind": "texture", "target": best["anm"],
+            "index": best["index"], "matches": [best], "mode": "single",
+            "detail": "尺寸不符（%s #%d %dx%d），将缩放替换"
+                      % (best["anm"], best["index"], best["w"], best["h"])}
+
+
+def _batch_classify(key, filename, data):
     """判断一个待导入文件的目标。"""
     base = os.path.basename(filename.replace("\\", "/"))
     a = STATE.archive(key)
     # 1) 贴图 PNG
     if base.lower().endswith(".png"):
-        m = BATCH_TEXTURE_RE.match(base)
-        anm_name = None
-        idx = None
-        if m:
-            anm_name = m.group("anm")
-            idx = int(m.group("idx"))
-        else:
-            m = BATCH_TEXTURE_ALT_RE.match(base)
-            if m:
-                anm_name = m.group("anm")
-                idx = int(m.group("idx"))
-        if anm_name is not None:
-            for cand in (anm_name, anm_name + ".anm"):
-                i = a.index_of(cand)
-                if i >= 0:
-                    return {"kind": "texture", "target": cand, "index": idx,
-                            "detail": "贴图 #%d" % idx}
-            return {"kind": "unknown", "target": base,
-                    "detail": "找不到贴图文件 %s.anm" % anm_name}
+        info = _classify_png(key, base, data)
+        if info:
+            return info
+        return {"kind": "unknown", "target": base,
+                "detail": "找不到同名贴图"}
     # 2) 对话文档 .txt
     if base.lower().endswith(".txt"):
         stem = base[:-4]
@@ -820,7 +935,7 @@ def _batch_classify(key, filename, size):
 
 def batch_add(key, filename, data):
     """把一个文件加入批量导入暂存区，返回识别结果。"""
-    info = _batch_classify(key, filename, len(data))
+    info = _batch_classify(key, filename, data)
     STATE.batch_seq += 1
     seq = STATE.batch_seq
     ext = os.path.splitext(filename)[1].lower() or ".bin"
@@ -925,33 +1040,68 @@ def batch_apply():
         replacements = {}
         # ---- 贴图：先合并到各自的 ANM ----
         anm_cache = {}
+        from PIL import Image
+        import numpy as np
+
+        def load_anm(name):
+            if name not in anm_cache:
+                anm_cache[name] = anm.AnmFile.from_bytes(a.read_by_name(name))
+            return anm_cache[name]
+
         for it in group:
             if it["kind"] != "texture":
                 continue
             try:
                 with open(it["staged"], "rb") as f:
                     png = f.read()
-                cache_key = it["target"]
-                if cache_key not in anm_cache:
-                    anm_cache[cache_key] = anm.AnmFile.from_bytes(
-                        a.read_by_name(cache_key))
-                f_anm = anm_cache[cache_key]
-                tex = None
-                for t in f_anm.textures:
-                    if t.entry_index == it["index"]:
-                        tex = t
-                        break
-                if tex is None:
-                    report["errors"].append("%s: 没有 #%d 号贴图"
-                                            % (it["file"], it["index"]))
-                    continue
-                from PIL import Image
-                import numpy as np
                 img = Image.open(io.BytesIO(png)).convert("RGBA")
-                encoded = anm.encode_rgba(tex.format, np.array(img))
-                f_anm.replace_texture(tex, encoded, img.width, img.height)
-                replacements[it["target"]] = f_anm.to_bytes()
+                arr = np.array(img)
+                matches = it.get("matches") or []
+                if not matches:
+                    matches = [{"anm": it["target"], "index": it["index"]}]
+                if it.get("mode") == "composed":
+                    # 合成图：按每条目的 x/y 切回去
+                    by_anm = {}
+                    for m in matches:
+                        by_anm.setdefault(m["anm"], []).append(m)
+                    done = 0
+                    for anm_name, ms in by_anm.items():
+                        f_anm = load_anm(anm_name)
+                        crops = []
+                        for m in ms:
+                            x, y = m.get("x", 0), m.get("y", 0)
+                            w, h = m["w"], m["h"]
+                            if y + h > arr.shape[0] or x + w > arr.shape[1]:
+                                raise ApiError(
+                                    "%s: 图片比合成画布小（需要 %dx%d）"
+                                    % (it["file"],
+                                       max(mm.get("x", 0) + mm["w"]
+                                           for mm in ms),
+                                       max(mm.get("y", 0) + mm["h"]
+                                           for mm in ms)))
+                            crops.append((m["index"], x, y, w, h,
+                                          arr[y:y + h, x:x + w]))
+                        done += f_anm.replace_many(crops)
+                        replacements[anm_name] = f_anm.to_bytes()
+                    if not done:
+                        report["errors"].append("%s: 没有可替换的贴图"
+                                                % it["file"])
+                        continue
+                else:
+                    m = matches[0]
+                    anm_name = m["anm"]
+                    f_anm = load_anm(anm_name)
+                    tex = f_anm.find(m["index"])
+                    if tex is None:
+                        report["errors"].append("%s: 没有 #%d 号贴图"
+                                                % (it["file"], m["index"]))
+                        continue
+                    encoded = anm.encode_rgba(tex.format, arr)
+                    f_anm.replace_texture(tex, encoded, img.width, img.height)
+                    replacements[anm_name] = f_anm.to_bytes()
                 report["texture"] += 1
+            except ApiError as ex:
+                report["errors"].append(str(ex))
             except Exception as ex:
                 report["errors"].append("%s: %s" % (it["file"], ex))
         # ---- 对话文档 ----
@@ -1012,6 +1162,7 @@ def batch_apply():
                     idx_map[i] = replacements[name]
             a.save_patched(path, idx_map)
             STATE.anm_cache = {}
+            STATE.texture_index = {}
     log("批量导入", "共 %d 个文件" % len(items),
         "贴图 %d / 对话 %d / 原样 %d / 评论 %d / 未识别 %d"
         % (report["texture"], report["dialogue"], report["raw"],
@@ -1331,6 +1482,8 @@ def main():
 
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     httpd.daemon_threads = True
+    # 后台预热贴图索引（首次要解压全部 .anm，之后走磁盘缓存）
+    threading.Thread(target=warm_up_texture_index, daemon=True).start()
     url = "http://127.0.0.1:%d/" % args.port
     print("=" * 56)
     print("  东方星莲船 魔改工具")

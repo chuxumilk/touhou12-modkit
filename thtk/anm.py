@@ -253,6 +253,13 @@ class AnmFile(object):
     # ------------------------------------------------------------------
     # 替换贴图并重建文件
     # ------------------------------------------------------------------
+    def find(self, index):
+        """按条目序号取贴图（每次调用都返回最新对象）。"""
+        for t in self.textures:
+            if t.entry_index == index:
+                return t
+        return None
+
     def replace_texture(self, texture, new_raw, new_w, new_h):
         """替换第 ``texture.entry_index`` 条贴图的像素数据。
 
@@ -297,5 +304,44 @@ class AnmFile(object):
         self.entry_offsets = fresh.entry_offsets
         return fresh.textures[texture.entry_index]
 
+    def replace_many(self, crops):
+        """一次替换多张同组贴图（用于导入“合成图”）。
+
+        :param crops: ``[(entry_index, x, y, w, h, rgba 子图), ...]``
+        :return: 实际替换的条目数
+        """
+        count = 0
+        for entry_index, x, y, w, h, sub in crops:
+            tex = self.find(entry_index)
+            if tex is None:
+                continue
+            if sub.shape[0] != h or sub.shape[1] != w:
+                raise AnmError("切图尺寸不符: 期望 %dx%d" % (w, h))
+            raw = encode_rgba(tex.format, sub)
+            self.replace_texture(tex, raw, w, h)
+            count += 1
+        return count
+
     def to_bytes(self):
         return self.data
+
+
+def composed_size(textures):
+    """一组同名贴图拼成的大图尺寸（各条目按自己的 x/y 摆放）。"""
+    if not textures:
+        return (0, 0)
+    return (max(t.x + t.width for t in textures),
+            max(t.y + t.height for t in textures))
+
+
+def group_by_name(textures):
+    """按贴图名分组，保持出现顺序。"""
+    groups = {}
+    order = []
+    for t in textures:
+        key = t.name.lower()
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(t)
+    return [(k, groups[k]) for k in order]
