@@ -203,10 +203,22 @@ def ensure_backup(path):
     """首次写入前备份原文件（只备份一次，保留最原始版本）。"""
     bak = path + BACKUP_SUFFIX
     if os.path.exists(path) and not os.path.exists(bak):
-        shutil.copy2(path, bak)
+        _atomic_copy(path, bak)
         log("创建备份", os.path.basename(bak),
             human_size(os.path.getsize(bak)))
     return bak
+
+
+def _atomic_copy(src, dst):
+    """原子复制：先写临时文件再替换。
+
+    这样绝不会“就地写入”目标文件——即使目标是硬链接，
+    也不会影响到链接指向的另一个文件（避免误改真实游戏文件）。
+    """
+    tmp = dst + ".tmp"
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, dst)
+    return dst
 
 
 def human_size(n):
@@ -1280,10 +1292,10 @@ def restore_backup(which):
         if os.path.exists(target):
             # 还原前保留当前状态，避免手滑丢失改动
             try:
-                shutil.copy2(target, target + ".modtool.prev")
+                _atomic_copy(target, target + ".modtool.prev")
             except OSError:
                 pass
-        shutil.copy2(bak, target)
+        _atomic_copy(bak, target)
         STATE.invalidate()
     log("还原备份", os.path.basename(bak),
         "-> %s（原文件已存为 .modtool.prev）" % os.path.basename(target))
