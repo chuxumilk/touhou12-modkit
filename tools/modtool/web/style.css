@@ -332,6 +332,41 @@ main { flex: 1; min-height: 0; display: flex; }
 }
 #save-comment { width: 100%; resize: vertical; }
 
+/* ---------------- 实时进度面板 ---------------- */
+.progress-panel {
+  position: fixed; right: 22px; bottom: 22px; width: 320px; z-index: 45;
+  background: linear-gradient(145deg, #232a3a, #1a202c);
+  border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px 16px; box-shadow: var(--shadow);
+  animation: toast-in .25s ease;
+}
+.pp-head { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; }
+.pp-head span:last-child { font-size: 13.5px; font-weight: 600; }
+.pp-spinner {
+  width: 13px; height: 13px; border-radius: 50%; flex: 0 0 13px;
+  border: 2px solid rgba(255,77,109,.25); border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.pp-bar {
+  height: 7px; background: var(--panel-2); border-radius: 999px;
+  overflow: hidden; border: 1px solid var(--line);
+}
+.pp-bar > div {
+  height: 100%; width: 0; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width .25s;
+}
+.pp-foot {
+  display: flex; justify-content: space-between; gap: 10px;
+  margin-top: 7px; font-size: 11.5px;
+}
+.pp-foot .muted { margin: 0; }
+#progress-detail {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 220px;
+}
+
 /* ---------------- 进度 / 提示 ---------------- */
 .progress {
   height: 8px; background: var(--panel-2); margin: 12px 20px;

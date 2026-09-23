@@ -248,8 +248,10 @@ async function doTexSearch(q) {
   S.searchMode = true;
   $("#side-hint").textContent = "正在搜索…";
   try {
+    startProgressWatch();
     const data = await api(
       `/api/textures.search?game=${S.game}&q=${encodeURIComponent(q)}`);
+    stopProgressWatch();
     $("#side-hint").textContent =
       `找到 ${data.total} 张（显示前 ${data.results.length} 张）`;
     // 左侧：按 ANM 归类
@@ -340,6 +342,7 @@ async function openAnm(name, li) {
   $("#texture-title").textContent = name;
   const grid = $("#texture-grid");
   grid.innerHTML = '<p class="muted" style="padding:8px">正在解析…</p>';
+  startProgressWatch();
   try {
     const data = await api(
       `/api/textures?game=${S.game}&anm=${encodeURIComponent(name)}`);
@@ -349,6 +352,8 @@ async function openAnm(name, li) {
   } catch (ex) {
     grid.innerHTML = "";
     toast("解析失败: " + ex.message, true);
+  } finally {
+    stopProgressWatch();
   }
 }
 
@@ -845,7 +850,9 @@ async function batchAddFiles(fileList) {
       inner.style.width = Math.round(done / files.length * 100) + "%";
     }
   }
+  startProgressWatch();
   await Promise.all(Array.from({ length: workers }, worker));
+  stopProgressWatch();
   bar.classList.add("hidden");
   await loadBatch();
   const data = await api("/api/batch");
@@ -878,6 +885,7 @@ $("#batch-apply").onclick = async () => {
   if (!data.ready) return;
   if (!confirm(`确定导入这 ${data.ready} 个文件吗？\n\n` +
     `会先自动备份原文件。\n（${batchReadyText(data.counts)}）`)) return;
+  startProgressWatch();
   try {
     const res = await api("/api/batch.apply", { method: "POST" });
     let msg = `导入完成：贴图 ${res.texture} · 对话 ${res.dialogue} · ` +
@@ -936,6 +944,46 @@ $("#log-download").onclick = () => {
   a.download = "modtool.log";
   a.click();
 };
+
+/* ---------------- 实时进度 ---------------- */
+let progressTimer = null;
+
+function renderProgress(p) {
+  const panel = $("#progress-panel");
+  if (!p || !p.active) {
+    panel.classList.add("hidden");
+    return;
+  }
+  panel.classList.remove("hidden");
+  $("#progress-label").textContent = p.label || "处理中…";
+  $("#progress-detail").textContent = p.detail || "";
+  const total = p.total || 0;
+  const cur = p.current || 0;
+  $("#progress-count").textContent = total ? `${cur} / ${total}` : "";
+  $("#progress-fill").style.width =
+    total ? Math.round(Math.min(1, cur / total) * 100) + "%" : "35%";
+}
+
+async function pollProgress() {
+  try {
+    const p = await api("/api/progress");
+    renderProgress(p);
+  } catch (e) { /* 忽略 */ }
+}
+
+function startProgressWatch() {
+  if (progressTimer) return;
+  pollProgress();
+  progressTimer = setInterval(pollProgress, 600);
+}
+
+function stopProgressWatch() {
+  if (progressTimer) {
+    clearInterval(progressTimer);
+    progressTimer = null;
+  }
+  setTimeout(pollProgress, 800);   // 收尾再查一次，确保面板及时收起
+}
 
 /* ---------------- 待保存 / 保存 ---------------- */
 async function loadPending() {
@@ -998,6 +1046,7 @@ $("#save-confirm").onclick = async () => {
   const btn = $("#save-confirm");
   btn.disabled = true;
   btn.textContent = "正在保存…";
+  startProgressWatch();
   try {
     const res = await api("/api/save", {
       method: "POST",
@@ -1019,6 +1068,7 @@ $("#save-confirm").onclick = async () => {
   } catch (ex) {
     toast("保存失败: " + ex.message, true);
   } finally {
+    stopProgressWatch();
     btn.disabled = false;
     btn.textContent = "保存并备份";
   }

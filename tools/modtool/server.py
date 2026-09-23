@@ -56,6 +56,79 @@ BACKUP_SUFFIX = ".modtool.bak"
 
 
 # ----------------------------------------------------------------------
+# 实时进度（前端轮询 /api/progress）
+# ----------------------------------------------------------------------
+class Progress(object):
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.seq = 0
+        self.data = {"active": False, "label": "", "detail": "",
+                     "current": 0, "total": 0, "token": 0,
+                     "background": False}
+
+    def start(self, label, total=0, detail="", background=False):
+        """开始一个进度；background=True 的任务不会抢占前台进度。
+
+        返回 token，更新时带上它，避免后台任务覆盖前台任务的进度。
+        """
+        with self.lock:
+            if background and self.data.get("active") and \
+                    not self.data.get("background"):
+                return None
+            self.seq += 1
+            self.data = {"active": True, "label": label, "detail": detail,
+                         "current": 0, "total": int(total or 0),
+                         "token": self.seq, "background": background}
+            return self.seq
+
+    def _check(self, token):
+        return token is None or self.data.get("token") == token
+
+    def update(self, current=None, total=None, detail=None, label=None,
+               token=None):
+        with self.lock:
+            if not self._check(token):
+                return
+            d = self.data
+            d["active"] = True
+            if label is not None:
+                d["label"] = label
+            if total is not None:
+                d["total"] = int(total)
+            if current is not None:
+                d["current"] = int(current)
+            if detail is not None:
+                d["detail"] = detail
+
+    def step(self, detail=None, label=None, token=None):
+        with self.lock:
+            if not self._check(token):
+                return
+            self.data["current"] = self.data.get("current", 0) + 1
+            if detail is not None:
+                self.data["detail"] = detail
+            if label is not None:
+                self.data["label"] = label
+
+    def done(self, token=None):
+        with self.lock:
+            if not self._check(token):
+                return
+            self.data = {"active": False, "label": "", "detail": "",
+                         "current": 0, "total": 0, "token": self.seq,
+                         "background": False}
+
+    def get(self):
+        with self.lock:
+            d = dict(self.data)
+            d.pop("token", None)
+            return d
+
+
+PROGRESS = Progress()
+
+
+# ----------------------------------------------------------------------
 # 操作日志
 # ----------------------------------------------------------------------
 class Logger(object):
@@ -498,8 +571,17 @@ def save_all(comment=""):
         for idx, loop in bgm_loop.items():
             fmt.tracks[idx].loop = loop
         new_dat = BGM_DAT + ".new"
+        total_tracks = len(fmt.tracks)
+        tok = PROGRESS.start("正在重建 thbgm.dat（约 400MB）",
+                             total_tracks)
         try:
-            bgm.rebuild_bgm_dat(BGM_DAT, new_dat, bgm_pending, fmt)
+            bgm.rebuild_bgm_dat(
+                BGM_DAT, new_dat, bgm_pending, fmt,
+                progress=lambda done, total: PROGRESS.update(
+                    current=done, total=total, token=tok,
+                    detail=fmt.tracks[min(done, total - 1)].name
+                    if total else ""))
+            PROGRESS.update(detail="正在生成备份…", token=tok)
             ensure_backup(BGM_DAT, comment)
             os.replace(new_dat, BGM_DAT)
             fmt_bytes = fmt.to_bytes()
@@ -508,6 +590,7 @@ def save_all(comment=""):
                 % (len(bgm_pending), len(bgm_loop)),
                 comment or human_size(os.path.getsize(BGM_DAT)))
         except Exception as ex:
+            PROGRESS.done(token=tok)
             result["errors"].append("BGM: %s" % ex)
             raise
 
@@ -521,12 +604,15 @@ def save_all(comment=""):
     for key, items in by_game.items():
         a = STATE.archive(key)
         replacements = {}
+        tok = PROGRESS.start("正在写入 %s" % GAMES[key]["dat"],
+                             len(items) + 1)
         for it in items:
             try:
                 with open(it["staged"], "rb") as f:
                     replacements[it["name"]] = f.read()
             except OSError as ex:
                 result["errors"].append("%s: %s" % (it["name"], ex))
+            PROGRESS.step(it["name"], token=tok)
         if fmt_bytes:
             replacements["thbgm.fmt"] = fmt_bytes
         if not replacements:
@@ -543,6 +629,8 @@ def save_all(comment=""):
         if not replacements:
             continue
         path = STATE.archive_path(key)
+        PROGRESS.update(detail="正在重打包归档 %s …" % GAMES[key]["dat"],
+                        token=tok)
         ensure_backup(path, comment)
         idx_map = {}
         for name, blob in replacements.items():
@@ -562,6 +650,7 @@ def save_all(comment=""):
 
     # ---- 3) 清空暂存 ----
     clear_pending()
+    PROGRESS.done()
     return result
 
 
@@ -1018,12 +1107,15 @@ def _texture_index(key):
 
     a = STATE.archive(key)
     index = {}
-    for e in a.entries:
-        if not e.name.lower().endswith(".anm"):
-            continue
+    anm_entries = [e for e in a.entries if e.name.lower().endswith(".anm")]
+    tok = PROGRESS.start("正在建立贴图索引", len(anm_entries),
+                         "(首次约需 30 秒，已在缓存后为秒级)",
+                         background=True)
+    for e in anm_entries:
         try:
             f = STATE.anm(key, e.name)
         except Exception:
+            PROGRESS.step(e.name, token=tok)
             continue
         for t in f.textures:
             base = t.name.rsplit("/", 1)[-1].lower()
@@ -1032,6 +1124,8 @@ def _texture_index(key):
                 "name": t.name, "format": t.format_name,
                 "w": t.width, "h": t.height, "x": t.x, "y": t.y,
             })
+        PROGRESS.step(e.name, token=tok)
+    PROGRESS.done(token=tok)
     with STATE.lock:
         STATE.texture_index[key] = index
     # 写磁盘缓存，并清掉旧版本
@@ -1313,6 +1407,10 @@ def batch_apply():
         items = list(STATE.batch)
     if not items:
         raise ApiError("暂存区是空的，请先选择文件夹")
+    tok = PROGRESS.start("正在处理批量导入", len(items))
+    for it in items:
+        PROGRESS.step(it["file"], token=tok)
+    PROGRESS.update(current=0, detail="正在解析文件…", token=tok)
     # 按 归档 -> 条目 汇总
     by_game = {}
     for it in items:
@@ -1467,6 +1565,7 @@ def batch_apply():
         % (report["texture"], report["dialogue"], report["raw"],
            report["musiccmt"], report["unknown"]))
     batch_clear()
+    PROGRESS.done(token=tok)
     report["ok"] = True
     return report
 
@@ -1717,6 +1816,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(list_backups())
         if route == "pending":
             return self._json(list_pending())
+        if route == "progress":
+            return self._json(PROGRESS.get())
         if route == "backup.download":
             which = q.get("key", "")
             mapping = {"jp": STATE.archive_path("jp"),
