@@ -300,6 +300,20 @@ function showSearchResult(r, li) {
   }]);
 }
 
+$("#texture-export-zip").onclick = () => {
+  const anmName = S.exportAnm || S.anmName;
+  if (!anmName) {
+    toast("先打开一个 .anm 文件", true);
+    return;
+  }
+  const a = document.createElement("a");
+  a.href = `/api/textures.zip?game=${S.game}` +
+    `&anm=${encodeURIComponent(anmName)}`;
+  a.download = anmName.replace(/\.anm$/i, "") + ".zip";
+  a.click();
+  toast("正在打包 " + anmName + " 的贴图…");
+};
+
 $("#tex-search").oninput = onTexSearchInput;
 $("#tex-search").onsearch = () => doTexSearch($("#tex-search").value.trim());
 $("#tex-search").onkeydown = (ev) => {
@@ -321,6 +335,8 @@ async function openAnm(name, li) {
   }
   $$("#anm-list li").forEach((el) => el.classList.remove("active"));
   if (li) li.classList.add("active");
+  S.exportAnm = name;
+  $("#texture-export-zip").disabled = false;
   $("#texture-title").textContent = name;
   const grid = $("#texture-grid");
   grid.innerHTML = '<p class="muted" style="padding:8px">正在解析…</p>';
@@ -334,6 +350,13 @@ async function openAnm(name, li) {
     grid.innerHTML = "";
     toast("解析失败: " + ex.message, true);
   }
+}
+
+/* 导出文件名：优先用游戏内原始贴图名（face/xx/face02no.png -> face02no.png） */
+function texExportName(t) {
+  let base = (t.name || "texture").split("/").pop() || "texture";
+  if (!/\.png$/i.test(base)) base += ".png";
+  return base;
 }
 
 function renderTextureCards(list) {
@@ -370,7 +393,7 @@ function renderTextureCards(list) {
     card.querySelector('[data-act="download"]').onclick = () => {
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${anmName}_${t.index}.png`;
+      a.download = texExportName(t);
       a.click();
     };
     card.querySelector('[data-act="replace"]').onclick =

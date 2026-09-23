@@ -1069,7 +1069,7 @@ def search_textures(key, query, limit=400):
 
 
 def list_anm_files(key):
-    """列出归档里所有 .anm 及其贴图数量。"""
+    """列出归档里所有 .anm。"""
     a = STATE.archive(key)
     out = []
     for e in a.entries:
@@ -1077,6 +1077,63 @@ def list_anm_files(key):
             continue
         out.append({"name": e.name, "size": e.size})
     return {"anms": out}
+
+
+def _texture_png_bytes(f, texture):
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.fromarray(f.rgba(texture)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _composed_rgba(f, group):
+    """把同名的一组合成成一张图（各条目按 x/y 摆放）。"""
+    import numpy as np
+    cw, ch = anm.composed_size(group)
+    canvas = np.zeros((ch, cw, 4), dtype=np.uint8)
+    for t in group:
+        canvas[t.y:t.y + t.height, t.x:t.x + t.width] = f.rgba(t)
+    return canvas
+
+
+def export_textures_zip(key, anm_name):
+    """一键导出某个 .anm 的全部贴图。
+
+    文件名与游戏内贴图名一致（如 face02no.png）；
+    同名多块会合成成一张图导出，完全重复的名字才加序号。
+    """
+    import zipfile
+    f = STATE.anm(key, anm_name)
+    groups = anm.group_by_name(f.textures)
+    buf = io.BytesIO()
+    used = set()
+    count = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for full_name, group in groups:
+            base = (full_name or "texture").rsplit("/", 1)[-1]
+            if base.lower().endswith(".png"):
+                base = base[:-4]
+            if not base:
+                base = "texture"
+            if len(group) == 1 and group[0].x == 0 and group[0].y == 0:
+                png = _texture_png_bytes(f, group[0])
+            else:
+                png = _texture_png_bytes_from(f, _composed_rgba(f, group))
+            name = base + ".png"
+            if name.lower() in used:
+                name = "%s_%d.png" % (base, group[0].entry_index)
+            used.add(name.lower())
+            z.writestr(name, png)
+            count += 1
+    fname = anm_name.rsplit(".", 1)[0] + ".zip"
+    return buf.getvalue(), fname, count
+
+
+def _texture_png_bytes_from(f, rgba):
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.fromarray(rgba).save(buf, "PNG")
+    return buf.getvalue()
 
 
 def warm_up_texture_index():
@@ -1597,6 +1654,16 @@ class Handler(BaseHTTPRequestHandler):
         if route == "textures":
             return self._json(list_textures(q.get("game", "jp"),
                                             q.get("anm", "")))
+        if route == "textures.zip":
+            key = q.get("game", "jp")
+            anm_name = q.get("anm", "")
+            data, fname, count = export_textures_zip(key, anm_name)
+            log("导出贴图包", "%s / %s" % (GAMES[key]["label"], anm_name),
+                "%d 张贴图" % count)
+            return self._send(
+                200, data, "application/zip",
+                {"Content-Disposition": "attachment; filename*=UTF-8''%s"
+                 % urllib.parse.quote(fname)})
         if route == "textures.search":
             return self._json(search_textures(q.get("game", "jp"),
                                               q.get("q", "")))
