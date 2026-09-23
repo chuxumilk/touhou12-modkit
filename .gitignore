@@ -24,3 +24,8 @@ __pycache__/
 *.tmp
 *.new
 
+# ===== 打包产物 =====
+tools/modtool/dist/
+tools/modtool/dist-setup/
+tools/modtool/build/
+tools/modtool/build-setup/

@@ -31,12 +31,27 @@ if WS not in sys.path:
 
 from thtk import anm, archive, bgm, crypto, msg  # noqa: E402
 
-WEB_DIR = os.path.join(HERE, "web")
-STAGING_DIR = os.path.join(HERE, "staging")
-CONFIG_PATH = os.path.join(HERE, "config.json")
-LOG_DIR = os.path.join(HERE, "logs")
+# ----------------------------------------------------------------------
+# 路径：源码运行 / PyInstaller 打包后运行 两种情况
+# ----------------------------------------------------------------------
+FROZEN = bool(getattr(sys, "frozen", False))
+if FROZEN:
+    EXE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+    BUNDLE_DIR = getattr(sys, "_MEIPASS", EXE_DIR)
+    # 配置/日志/暂存放到用户目录，避免装在 Program Files 下没有写权限
+    DATA_DIR = os.path.join(
+        os.environ.get("LOCALAPPDATA") or EXE_DIR, "TH12ModTool")
+else:
+    EXE_DIR = WS
+    BUNDLE_DIR = HERE
+    DATA_DIR = HERE
+
+WEB_DIR = os.path.join(BUNDLE_DIR, "web")
+STAGING_DIR = os.path.join(DATA_DIR, "staging")
+CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+LOG_DIR = os.path.join(DATA_DIR, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "modtool.log")
-BACKUP_META = os.path.join(HERE, "backups.json")
+BACKUP_META = os.path.join(DATA_DIR, "backups.json")
 BACKUP_SUFFIX = ".modtool.bak"
 
 
@@ -119,7 +134,7 @@ LOG = Logger(LOG_PATH)
 def log(action, target="", detail="", level="info"):
     return LOG.log(action, target, detail, level)
 
-GAME_DIR = os.path.join(WS, "game",
+GAME_DIR = os.path.join(EXE_DIR, "game",
                         "[th12] 东方星莲船 (汉化版+日文版)")
 
 GAMES = {
@@ -173,10 +188,11 @@ def check_game_dir(path):
 def find_candidates():
     """在常见位置找有 th12.dat / th12c.dat 的目录。"""
     roots = [
-        os.path.join(WS, "game"),
-        WS,
-        os.path.dirname(WS),
-        os.path.dirname(os.path.dirname(WS)),
+        os.path.join(EXE_DIR, "game"),
+        EXE_DIR,
+        os.path.dirname(EXE_DIR),
+        os.path.dirname(os.path.dirname(EXE_DIR)),
+        os.getcwd(),
     ]
     out = []
     seen = set()
@@ -896,24 +912,30 @@ def set_config(payload):
 
 
 def pick_directory():
-    """弹出一个 Windows 原生“选择文件夹”对话框。"""
-    code = (
-        "import tkinter as tk\n"
-        "from tkinter import filedialog\n"
-        "root = tk.Tk()\n"
-        "root.withdraw()\n"
-        "root.attributes('-topmost', True)\n"
-        "p = filedialog.askdirectory(title='选择 TH12 游戏目录')\n"
-        "print(p or '')\n"
+    """弹出一个 Windows 原生“选择文件夹”对话框（用 PowerShell，
+    源码运行和打包运行都能用）。"""
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms\r\n"
+        "$d = New-Object System.Windows.Forms.FolderBrowserDialog\r\n"
+        "$d.Description = '选择 TH12 游戏目录（里面有 th12.dat）'\r\n"
+        "$d.ShowNewFolderButton = $false\r\n"
+        "if ($d.ShowDialog() -eq "
+        "[System.Windows.Forms.DialogResult]::OK) "
+        "{ [Console]::Out.Write($d.SelectedPath) }\r\n"
     )
+    tmp = os.path.join(STAGING_DIR, "pickdir.ps1")
     try:
-        out = subprocess.run([sys.executable, "-c", code],
-                             capture_output=True, text=True, timeout=600)
+        if not os.path.isdir(STAGING_DIR):
+            os.makedirs(STAGING_DIR)
+        with io.open(tmp, "w", encoding="utf-8-sig") as f:
+            f.write(script)
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
+             "-File", tmp],
+            capture_output=True, text=True, timeout=900)
     except Exception as ex:
         raise ApiError("无法打开文件夹选择框: %s" % ex)
-    path = (out.stdout or "").strip().splitlines()
-    path = path[-1].strip() if path else ""
-    return {"path": path}
+    return {"path": (out.stdout or "").strip()}
 
 
 def launch_game(key=None):
