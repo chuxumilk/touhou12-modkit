@@ -13,6 +13,7 @@ _recon/testgame*/
 tools/modtool/staging/
 tools/modtool/logs/
 tools/modtool/config.json
+tools/modtool/backups.json
 __pycache__/
 *.py[cod]
 

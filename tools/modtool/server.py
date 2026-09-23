@@ -36,6 +36,7 @@ STAGING_DIR = os.path.join(HERE, "staging")
 CONFIG_PATH = os.path.join(HERE, "config.json")
 LOG_DIR = os.path.join(HERE, "logs")
 LOG_PATH = os.path.join(LOG_DIR, "modtool.log")
+BACKUP_META = os.path.join(HERE, "backups.json")
 BACKUP_SUFFIX = ".modtool.bak"
 
 
@@ -199,14 +200,45 @@ def find_candidates():
 # ----------------------------------------------------------------------
 # 工具函数
 # ----------------------------------------------------------------------
-def ensure_backup(path):
+def ensure_backup(path, comment=""):
     """首次写入前备份原文件（只备份一次，保留最原始版本）。"""
     bak = path + BACKUP_SUFFIX
     if os.path.exists(path) and not os.path.exists(bak):
         _atomic_copy(path, bak)
+        _record_backup(bak, comment)
         log("创建备份", os.path.basename(bak),
             human_size(os.path.getsize(bak)))
+    elif comment and os.path.exists(bak):
+        _record_backup(bak, comment)
     return bak
+
+
+def _record_backup(bak, comment=""):
+    """把备份的生成时间和备注记到 backups.json。"""
+    try:
+        meta = {}
+        if os.path.isfile(BACKUP_META):
+            with io.open(BACKUP_META, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        item = meta.setdefault(os.path.basename(bak), {})
+        item.setdefault("created", time.time())
+        if comment:
+            item["comment"] = comment
+        item["updated"] = time.time()
+        with io.open(BACKUP_META, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+    except (OSError, ValueError):
+        pass
+
+
+def _backup_meta():
+    try:
+        if os.path.isfile(BACKUP_META):
+            with io.open(BACKUP_META, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except (OSError, ValueError):
+        pass
+    return {}
 
 
 def _atomic_copy(src, dst):
@@ -262,6 +294,8 @@ class State(object):
         self.archives = {}
         self.anm_cache = {}
         self.texture_index = {}
+        self.pending = []
+        self.pending_seq = 0
         self.fmt = None
         self.bgm_pending = {}     # index -> 暂存的 PCM 文件路径
         self.bgm_loop = {}        # index -> 新的循环点（字节）
@@ -353,20 +387,166 @@ def list_archive(key):
 
 
 def save_archive_entry(key, name, data, action="写入归档文件", detail=""):
-    """替换归档里的一个条目（自动备份）。"""
+    """【暂存】修改内容，等用户点“保存”时才写入游戏。"""
     with STATE.lock:
         a = STATE.archive(key)
-        idx = a.index_of(name)
-        if idx < 0:
+        if a.index_of(name) < 0:
             raise ApiError("归档中没有条目: %s" % name, 404)
+        STATE.pending_seq += 1
+        seq = STATE.pending_seq
+        staged = os.path.join(STAGING_DIR, "pending_%04d.bin" % seq)
+        with open(staged, "wb") as f:
+            f.write(data)
+        # 同一条目只保留最后一次修改
+        STATE.pending = [x for x in STATE.pending
+                         if not (x["game"] == key and x["name"] == name)]
+        STATE.pending.append({
+            "id": seq, "game": key, "name": name,
+            "action": action, "detail": detail or human_size(len(data)),
+            "size": len(data), "staged": staged,
+            "time": time.strftime("%H:%M:%S"),
+        })
+    return {"ok": True, "name": name, "size": len(data), "staged": True}
+
+
+def list_pending():
+    """列出待保存的修改（归档 + BGM）。"""
+    with STATE.lock:
+        items = [dict(x) for x in STATE.pending]
+        bgm_replace = sorted(STATE.bgm_replaced)
+        bgm_loop = dict(STATE.bgm_loop)
+    fmt = None
+    out = []
+    for it in items:
+        out.append({
+            "kind": "file", "game": it["game"], "name": it["name"],
+            "action": it["action"], "detail": it["detail"],
+            "size_text": human_size(it["size"]), "time": it["time"],
+        })
+    if bgm_replace or bgm_loop:
+        try:
+            fmt = STATE.bgm_fmt()
+        except Exception:
+            fmt = None
+    for idx in bgm_replace:
+        name = fmt.tracks[idx].name if fmt else ("曲目 %d" % idx)
+        out.append({"kind": "bgm", "game": "bgm", "name": name,
+                    "action": "替换BGM", "detail": "整个曲目已替换",
+                    "size_text": "", "time": ""})
+    for idx, loop in bgm_loop.items():
+        if idx in bgm_replace:
+            continue
+        name = fmt.tracks[idx].name if fmt else ("曲目 %d" % idx)
+        out.append({"kind": "bgm", "game": "bgm", "name": name,
+                    "action": "循环点", "detail": "%.2f 秒"
+                    % (loop / float(bgm.BYTES_PER_SEC)),
+                    "size_text": "", "time": ""})
+    return {"items": out, "count": len(out)}
+
+
+def clear_pending():
+    with STATE.lock:
+        for it in STATE.pending:
+            try:
+                os.remove(it["staged"])
+            except OSError:
+                pass
+        STATE.pending = []
+        for path in STATE.bgm_pending.values():
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        STATE.bgm_pending = {}
+        STATE.bgm_loop = {}
+        STATE.bgm_replaced = set()
+    return {"ok": True}
+
+
+def save_all(comment=""):
+    """把暂存的所有修改写入游戏（同时生成备份，并把备注记进备份元数据）。"""
+    comment = (comment or "").strip()
+    result = {"ok": True, "files": 0, "bgm": False, "errors": [],
+              "comment": comment}
+    with STATE.lock:
+        pending = [dict(x) for x in STATE.pending]
+        bgm_pending = dict(STATE.bgm_pending)
+        bgm_loop = dict(STATE.bgm_loop)
+    if not pending and not bgm_pending and not bgm_loop:
+        raise ApiError("没有待保存的修改")
+
+    # ---- 1) BGM：先重建 thbgm.dat，并把新 fmt 混入归档修改 ----
+    fmt_bytes = None
+    if bgm_pending or bgm_loop:
+        fmt = STATE.bgm_fmt()
+        for idx, loop in bgm_loop.items():
+            fmt.tracks[idx].loop = loop
+        new_dat = BGM_DAT + ".new"
+        try:
+            bgm.rebuild_bgm_dat(BGM_DAT, new_dat, bgm_pending, fmt)
+            ensure_backup(BGM_DAT, comment)
+            os.replace(new_dat, BGM_DAT)
+            fmt_bytes = fmt.to_bytes()
+            result["bgm"] = True
+            log("保存BGM修改", "%d 首替换 / %d 首循环点"
+                % (len(bgm_pending), len(bgm_loop)),
+                comment or human_size(os.path.getsize(BGM_DAT)))
+        except Exception as ex:
+            result["errors"].append("BGM: %s" % ex)
+            raise
+
+    # ---- 2) 归档：按版本分组，一次写入 ----
+    by_game = {}
+    for it in pending:
+        by_game.setdefault(it["game"], []).append(it)
+    if fmt_bytes:
+        for key in STATE.available_games():
+            by_game.setdefault(key, [])
+    for key, items in by_game.items():
+        a = STATE.archive(key)
+        replacements = {}
+        for it in items:
+            try:
+                with open(it["staged"], "rb") as f:
+                    replacements[it["name"]] = f.read()
+            except OSError as ex:
+                result["errors"].append("%s: %s" % (it["name"], ex))
+        if fmt_bytes:
+            replacements["thbgm.fmt"] = fmt_bytes
+        if not replacements:
+            continue
+        # 写盘前自检：ANM 结构必须合法
+        bad = []
+        for name, blob in list(replacements.items()):
+            if name.lower().endswith(".anm"):
+                problems = anm.AnmFile.from_bytes(blob).validate()
+                if problems:
+                    bad.append("%s: %s" % (name, "；".join(problems[:2])))
+                    del replacements[name]
+        result["errors"].extend(bad)
+        if not replacements:
+            continue
         path = STATE.archive_path(key)
-        ensure_backup(path)
-        a.save_patched(path, {idx: data})
+        ensure_backup(path, comment)
+        idx_map = {}
+        for name, blob in replacements.items():
+            i = a.index_of(name)
+            if i >= 0:
+                idx_map[i] = blob
+        try:
+            a.save_patched(path, idx_map)
+        except PermissionError:
+            raise ApiError("文件被占用：请先关闭游戏（th12.exe / th12c.exe）")
         STATE.anm_cache = {}
         STATE.texture_index = {}
-    log(action, "%s / %s" % (GAMES[key]["label"], name),
-        detail or human_size(len(data)))
-    return {"ok": True, "name": name, "size": len(data)}
+        result["files"] += len(replacements)
+        for it in items:
+            log(it["action"], "%s / %s" % (GAMES[key]["label"], it["name"]),
+                (it["detail"] + ("　备注: " + comment if comment else "")))
+
+    # ---- 3) 清空暂存 ----
+    clear_pending()
+    return result
 
 
 def list_textures(key, anm_name):
@@ -565,23 +745,9 @@ def _apply_bgm(job):
         human_size(os.path.getsize(BGM_DAT)))
 
 
-def start_bgm_apply():
-    job = STATE.new_job()
-
-    def runner():
-        try:
-            _apply_bgm(job)
-            job["state"] = "done"
-            job["progress"] = 1.0
-        except Exception as ex:
-            job["state"] = "error"
-            job["message"] = str(ex)
-            job["trace"] = traceback.format_exc()
-
-    t = threading.Thread(target=runner)
-    t.daemon = True
-    t.start()
-    return {"job": job["id"]}
+def start_bgm_apply(comment=""):
+    """兼容旧接口：BGM 的“应用”现在走统一保存。"""
+    return save_all(comment)
 
 
 def get_msg(key, name):
@@ -1077,7 +1243,7 @@ def batch_apply():
 
     report = {"texture": 0, "dialogue": 0, "raw": 0, "musiccmt": 0,
               "unknown": 0, "changed_lines": 0, "bad_chars": [],
-              "unmatched": 0, "errors": []}
+              "unmatched": 0, "errors": [], "staged": 0}
     for it in items:
         if it["kind"] == "unknown":
             report["unknown"] += 1
@@ -1199,31 +1365,25 @@ def batch_apply():
                 report["raw"] += 1
             except Exception as ex:
                 report["errors"].append("%s: %s" % (it["file"], ex))
-        # ---- 一次性写入归档 ----
-        if replacements:
-            # 写盘前自检：任何 ANM 结构异常都拒绝保存
-            for name, blob in replacements.items():
-                if name.lower().endswith(".anm"):
-                    problems = anm.AnmFile.from_bytes(blob).validate()
-                    if problems:
-                        report["errors"].append(
-                            "%s 结构异常，已跳过: %s"
-                            % (name, "；".join(problems[:2])))
-                        replacements[name] = None
-            replacements = {k: v for k, v in replacements.items()
-                            if v is not None}
-        if replacements:
-            path = STATE.archive_path(key)
-            ensure_backup(path)
-            idx_map = {}
-            for name in replacements:
-                i = a.index_of(name)
-                if i >= 0:
-                    idx_map[i] = replacements[name]
-            a.save_patched(path, idx_map)
-            STATE.anm_cache = {}
-            STATE.texture_index = {}
-    log("批量导入", "共 %d 个文件" % len(items),
+        # ---- 加入待保存队列（写盘前自检 ANM 结构） ----
+        for name, blob in replacements.items():
+            if name.lower().endswith(".anm"):
+                problems = anm.AnmFile.from_bytes(blob).validate()
+                if problems:
+                    report["errors"].append(
+                        "%s 结构异常，已跳过: %s"
+                        % (name, "；".join(problems[:2])))
+                    continue
+            action = ("导入贴图" if name.lower().endswith(".anm")
+                      else "导入对话文档" if name.lower().endswith(".msg")
+                      else "批量替换文件")
+            try:
+                save_archive_entry(key, name, blob, action=action,
+                                   detail="批量导入")
+                report["staged"] += 1
+            except ApiError as ex:
+                report["errors"].append("%s: %s" % (name, ex))
+    log("批量导入（暂存）", "共 %d 个文件" % len(items),
         "贴图 %d / 对话 %d / 原样 %d / 评论 %d / 未识别 %d"
         % (report["texture"], report["dialogue"], report["raw"],
            report["musiccmt"], report["unknown"]))
@@ -1241,6 +1401,7 @@ def _fmt_time(ts):
 
 def list_backups():
     """列出备份及其与当前文件的差异。"""
+    meta = _backup_meta()
     items = [("jp", STATE.archive_path("jp")),
              ("cn", STATE.archive_path("cn")),
              ("bgm", BGM_DAT)]
@@ -1250,8 +1411,11 @@ def list_backups():
         if not os.path.exists(bak):
             continue
         st = os.stat(bak)
-        # copy2 会保留源文件时间，所以“备份时间”取创建时间
-        created = st.st_ctime if st.st_ctime > st.st_mtime else st.st_mtime
+        info = meta.get(os.path.basename(bak), {})
+        # copy2 会保留源文件时间，所以“备份时间”优先用元数据里的创建时间
+        created = info.get("created") or st.st_ctime
+        if created <= 0:
+            created = st.st_mtime
         cur_size = os.path.getsize(target) if os.path.exists(target) else 0
         cur_mtime = os.path.getmtime(target) if os.path.exists(target) else 0
         # 时间或大小任一不同都算“备份后被改过”
@@ -1266,6 +1430,7 @@ def list_backups():
             "created": created,
             "time_text": _fmt_time(created),
             "source_time_text": _fmt_time(st.st_mtime),
+            "comment": info.get("comment", ""),
             "current_size": cur_size,
             "current_size_text": human_size(cur_size),
             "current_time_text": _fmt_time(cur_mtime) if cur_mtime else "-",
@@ -1461,6 +1626,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(get_musiccmt(q.get("game", "jp")))
         if route == "backups":
             return self._json(list_backups())
+        if route == "pending":
+            return self._json(list_pending())
         if route == "backup.download":
             which = q.get("key", "")
             mapping = {"jp": STATE.archive_path("jp"),
@@ -1503,7 +1670,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(bgm_set_loop(
                     int(q.get("index", "0")), q.get("loop", "0")))
             if route == "bgm.apply":
-                return self._json(start_bgm_apply())
+                payload = json.loads(body.decode("utf-8") or "{}")
+                return self._json(start_bgm_apply(payload.get("comment", "")))
             if route == "bgm.cancel":
                 return self._json(bgm_cancel())
             if route == "msg":
@@ -1541,6 +1709,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(restore_backup(q.get("key", "")))
             if route == "restore.all":
                 return self._json(restore_all())
+            if route == "save":
+                payload = json.loads(body.decode("utf-8") or "{}")
+                return self._json(save_all(payload.get("comment", "")))
+            if route == "pending.clear":
+                return self._json(clear_pending())
             if route == "config":
                 payload = json.loads(body.decode("utf-8") or "{}")
                 return self._json(set_config(payload))

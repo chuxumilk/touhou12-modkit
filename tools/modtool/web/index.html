@@ -78,13 +78,14 @@
       <div class="content-head">
         <h2>BGM 曲目</h2>
         <div class="actions">
-          <button id="bgm-apply" class="primary" disabled>应用修改到游戏</button>
-          <button id="bgm-cancel" disabled>放弃修改</button>
+          <button id="bgm-apply" class="btn-primary" disabled>保存到游戏…</button>
+          <button id="bgm-cancel" disabled>放弃音乐修改</button>
         </div>
       </div>
       <p class="hint">替换曲目：上传 WAV（自动转成 16bit / 立体声 / 44100Hz）。
         循环点 = 曲目内循环回到的位置（秒），0 表示从头循环。
-        修改先暂存，点“应用修改”才会重建 400MB 的 thbgm.dat。</p>
+        所有修改都会先**暂存**，点页面底部的「保存到游戏」才会真正写入
+        （重建 thbgm.dat 约 400MB，需要一点时间）。</p>
       <div id="bgm-progress" class="progress hidden"><div></div></div>
       <table class="table" id="bgm-table">
         <thead>
@@ -227,6 +228,35 @@
 </main>
 
 <div id="toast" class="toast hidden"></div>
+
+<!-- 待保存修改条 -->
+<div id="pending-bar" class="pending-bar hidden">
+  <span class="pb-icon">&#128190;</span>
+  <span class="pb-text">有 <b id="pending-count">0</b> 项修改待保存</span>
+  <span id="pending-summary" class="pb-summary"></span>
+  <div class="pb-actions">
+    <button id="pending-view">查看</button>
+    <button id="pending-save" class="btn-primary">保存到游戏…</button>
+    <button id="pending-discard">放弃</button>
+  </div>
+</div>
+
+<!-- 保存对话框 -->
+<div id="save-modal" class="lightbox hidden">
+  <div class="modal" onclick="event.stopPropagation()">
+    <h2>保存修改到游戏</h2>
+    <p class="hint">会把下面这些修改一次性写入游戏文件，并在写入前自动备份原文件。</p>
+    <div id="save-list" class="save-list"></div>
+    <label class="field-label">本次修改备注（会记进备份和日志，方便以后还原时辨认）</label>
+    <textarea id="save-comment" rows="2"
+      placeholder="例如：第2面立绘替换 / BGM 换成 XX"></textarea>
+    <div class="modal-actions">
+      <button id="save-cancel">取消</button>
+      <button id="save-confirm" class="btn-primary">保存并备份</button>
+    </div>
+  </div>
+</div>
+
 <div id="lightbox" class="lightbox hidden"><img id="lightbox-img" alt=""></div>
 <input id="hidden-file" type="file" class="hidden">
 <input id="hidden-folder" type="file" webkitdirectory directory multiple class="hidden">

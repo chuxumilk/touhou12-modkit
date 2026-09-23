@@ -10,6 +10,8 @@ const S = {
   msgName: null,
   msgData: null,
   bgm: null,
+  pending: null,
+  lastComment: "",
   pendingCount: 0,
 };
 
@@ -108,6 +110,7 @@ async function boot() {
     await loadMusiccmt();
   };
   updatePending(st.bgm);
+  await loadPending();
   await loadArchive();
   await loadBgm();
   await loadMusiccmt();
@@ -190,13 +193,6 @@ $("#btn-launch").onclick = async () => {
 function updatePending(bgminfo) {
   if (!bgminfo) return;
   S.pendingCount = bgminfo.pending_count || 0;
-  const badge = $("#pending-badge");
-  if (S.pendingCount > 0) {
-    badge.textContent = `音乐待应用 ${S.pendingCount} 项`;
-    badge.classList.remove("hidden");
-  } else {
-    badge.classList.add("hidden");
-  }
   $("#bgm-apply").disabled = S.pendingCount === 0;
   $("#bgm-cancel").disabled = S.pendingCount === 0;
 }
@@ -393,7 +389,8 @@ async function replaceTexture(t, anmName) {
       `/api/texture?game=${S.game}&anm=${encodeURIComponent(anmName)}` +
       `&index=${t.index}`,
       { method: "POST", body: buf });
-    toast(`已替换 ${t.name} (${res.width}×${res.height})`);
+    toast(`已暂存 ${t.name}（${res.width}×${res.height}），记得点下方「保存到游戏」`);
+    await loadPending();
     const card = document.querySelector(`.card[data-index="${t.index}"]`);
     if (card) {
       const img = card.querySelector("img");
@@ -486,38 +483,14 @@ async function setBgmLoop(t) {
   }
 }
 
-$("#bgm-apply").onclick = async () => {
-  if (!confirm("确定要把修改写入游戏吗？\n\n会先自动备份原文件，"
-    + "然后重建 thbgm.dat（约 400MB，需要一点时间）。")) return;
-  try {
-    const { job } = await api("/api/bgm.apply", { method: "POST" });
-    const bar = $("#bgm-progress");
-    bar.classList.remove("hidden");
-    const inner = bar.firstElementChild;
-    const poll = setInterval(async () => {
-      const j = await api("/api/job?id=" + job);
-      inner.style.width = Math.round((j.progress || 0) * 100) + "%";
-      if (j.state === "done") {
-        clearInterval(poll);
-        bar.classList.add("hidden");
-        toast("音乐修改已写入游戏！");
-        await loadBgm();
-        await loadBackups();
-      } else if (j.state === "error") {
-        clearInterval(poll);
-        bar.classList.add("hidden");
-        toast("写入失败: " + j.message, true);
-      }
-    }, 500);
-  } catch (ex) {
-    toast("失败: " + ex.message, true);
-  }
-};
+$("#bgm-apply").onclick = () => openSaveDialog();
 
 $("#bgm-cancel").onclick = async () => {
+  if (!confirm("放弃暂存的音乐修改吗？")) return;
   await api("/api/bgm.cancel", { method: "POST" });
   toast("已放弃暂存的音乐修改");
   await loadBgm();
+  await loadPending();
 };
 
 /* ---------------- 对话 ---------------- */
@@ -678,7 +651,8 @@ $("#msg-save").onclick = async () => {
     const res = await api(
       `/api/msg?game=${S.game}&name=${encodeURIComponent(S.msgName)}`,
       { method: "POST", body: JSON.stringify(payload) });
-    toast(res.changed ? `已保存 ${res.changed} 处修改` : "没有修改");
+    toast(res.changed ? `已暂存 ${res.changed} 处修改，记得点「保存到游戏」` : "没有修改");
+    if (res.changed) await loadPending();
     if (res.bad_chars && res.bad_chars.length) {
       toast("注意: 有字符无法用 " + S.msgData.encoding +
         " 表示，已变成 ? —— " + res.bad_chars.join(" "), true);
@@ -732,8 +706,8 @@ async function replaceRawFile(e) {
     const buf = await file.arrayBuffer();
     await api(`/api/file?game=${S.game}&name=${encodeURIComponent(e.name)}`,
       { method: "POST", body: buf });
-    toast("已替换 " + e.name);
-    await loadArchive();
+    toast("已暂存 " + e.name + "，记得点「保存到游戏」");
+    await loadPending();
   } catch (ex) {
     toast("替换失败: " + ex.message, true);
   }
@@ -755,7 +729,8 @@ $("#musiccmt-save").onclick = async () => {
       method: "POST",
       body: JSON.stringify({ text: $("#musiccmt-text").value }),
     });
-    toast("音乐室评论已保存");
+    toast("音乐室评论已暂存，记得点「保存到游戏」");
+    await loadPending();
   } catch (ex) {
     toast("保存失败: " + ex.message, true);
   }
@@ -885,7 +860,8 @@ $("#batch-apply").onclick = async () => {
     let msg = `导入完成：贴图 ${res.texture} · 对话 ${res.dialogue} · ` +
       `原样 ${res.raw} · 评论 ${res.musiccmt}`;
     if (res.changed_lines) msg += `（对话共改 ${res.changed_lines} 句）`;
-    toast(msg);
+    toast(msg + "，已加入待保存");
+    await loadPending();
     if (res.unknown) toast(`有 ${res.unknown} 个文件未识别，已跳过`, true);
     if (res.errors && res.errors.length) {
       toast("部分失败: " + res.errors.slice(0, 3).join("；"), true);
@@ -936,6 +912,93 @@ $("#log-download").onclick = () => {
   a.href = "/api/logs.download";
   a.download = "modtool.log";
   a.click();
+};
+
+/* ---------------- 待保存 / 保存 ---------------- */
+async function loadPending() {
+  try {
+    const data = await api("/api/pending");
+    S.pending = data;
+    const bar = $("#pending-bar");
+    if (!data.count) {
+      bar.classList.add("hidden");
+      return;
+    }
+    bar.classList.remove("hidden");
+    $("#pending-count").textContent = data.count;
+    const names = data.items.slice(0, 3).map((i) => i.name).join("、");
+    $("#pending-summary").textContent =
+      data.count > 3 ? `${names} 等` : names;
+  } catch (ex) { /* 忽略 */ }
+}
+
+$("#pending-view").onclick = async () => {
+  const data = await api("/api/pending");
+  alert("待保存的修改：\n\n" + data.items.map(
+    (i, n) => `${n + 1}. [${i.action}] ${i.name}\n     ${i.detail}`
+  ).join("\n"));
+};
+
+$("#pending-discard").onclick = async () => {
+  if (!confirm("放弃所有未保存的修改吗？（游戏文件不会被改动）")) return;
+  await api("/api/pending.clear", { method: "POST" });
+  toast("已放弃未保存的修改");
+  await loadPending();
+  await loadBgm();
+};
+
+$("#pending-save").onclick = () => openSaveDialog();
+
+async function openSaveDialog() {
+  const data = await api("/api/pending");
+  if (!data.count) {
+    toast("没有待保存的修改");
+    return;
+  }
+  $("#save-list").innerHTML = data.items.map((i) =>
+    `<div class="save-item">
+       <span class="pill">${i.action}</span>
+       <span class="si-name">${i.name}</span>
+       <span class="si-detail">${i.detail || ""}</span>
+     </div>`).join("");
+  $("#save-comment").value = S.lastComment || "";
+  $("#save-modal").classList.remove("hidden");
+  setTimeout(() => $("#save-comment").focus(), 50);
+}
+
+function closeSaveDialog() { $("#save-modal").classList.add("hidden"); }
+$("#save-cancel").onclick = closeSaveDialog;
+$("#save-modal").onclick = closeSaveDialog;
+
+$("#save-confirm").onclick = async () => {
+  const comment = $("#save-comment").value.trim();
+  const btn = $("#save-confirm");
+  btn.disabled = true;
+  btn.textContent = "正在保存…";
+  try {
+    const res = await api("/api/save", {
+      method: "POST",
+      body: JSON.stringify({ comment }),
+    });
+    S.lastComment = comment;
+    closeSaveDialog();
+    let msg = `已保存 ${res.files} 个文件`;
+    if (res.bgm) msg += " + BGM";
+    toast(msg + (res.errors.length ? "（部分失败）" : ""));
+    if (res.errors.length) toast("失败: " + res.errors.join("；"), true);
+    S.anmName = null;
+    S.msgName = null;
+    await loadPending();
+    await loadArchive();
+    await loadBgm();
+    await loadMusiccmt();
+    await loadBackups();
+  } catch (ex) {
+    toast("保存失败: " + ex.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "保存并备份";
+  }
 };
 
 /* ---------------- 备份 ---------------- */
