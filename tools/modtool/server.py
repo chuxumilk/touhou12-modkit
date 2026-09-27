@@ -1329,6 +1329,47 @@ def get_musiccmt(key):
 # ----------------------------------------------------------------------
 # 游戏目录 / 启动游戏
 # ----------------------------------------------------------------------
+RUNNING_HINT = ("检测到游戏正在运行：%s\n"
+                "请先完全退出游戏再写入！\n"
+                "游戏运行时它的数据文件可能允许被写入，硬写会导致"
+                "【游戏文件损坏】（而不是简单的“文件被占用”）。\n"
+                "改完后再打开游戏即可看到效果。")
+
+
+def running_game_processes():
+    """返回当前正在运行的游戏进程名列表（空列表表示没在运行）。
+
+    这是写盘前的**预检查**：游戏运行时数据文件往往仍可写，
+    靠写入报错来判断已经太晚——硬写可能直接写坏游戏文件。
+    """
+    try:
+        out = subprocess.run(["tasklist", "/fo", "csv", "/nh"],
+                             capture_output=True, timeout=10)
+    except Exception:
+        return []
+    try:
+        text = (out.stdout or b"").decode("gbk", "replace")
+    except Exception:
+        text = (out.stdout or b"").decode("utf-8", "replace")
+    found = []
+    for line in text.splitlines():
+        line = line.strip().strip('"')
+        if not line:
+            continue
+        name = line.split('","')[0].strip('"').lower()
+        if name in ("th12.exe", "th12c.exe", "custom.exe", "custom_cn.exe"):
+            if name not in found:
+                found.append(name)
+    return found
+
+
+def ensure_game_closed():
+    """写游戏文件之前调用：游戏在运行就直接拒绝，避免写坏。"""
+    running = running_game_processes()
+    if running:
+        raise ApiError(RUNNING_HINT % "、".join(running))
+
+
 # 用户可能直接把游戏数据文件拖/填进来，这里统一转成「目录」
 GAME_FILES = {}
 for _k, _info in GAMES.items():
@@ -2453,6 +2494,11 @@ class Handler(BaseHTTPRequestHandler):
         raise ApiError("未知接口: %s" % route, 404)
 
     # ---- POST -----------------------------------------------------
+    # 这些接口会真正写游戏文件：写之前先确认游戏没在运行
+    WRITE_ROUTES = ("file", "texture", "msg", "msg.import", "musiccmt",
+                    "bgm.apply", "bgm.replace", "save", "restore",
+                    "restore.all", "batch.apply", "texture.import")
+
     def do_POST(self):
         try:
             path, q = self._query()
@@ -2460,6 +2506,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError("未知接口", 404)
             route = path[5:]
             body = self._read_body()
+            if route in self.WRITE_ROUTES:
+                ensure_game_closed()
             if route == "file":
                 return self._json(save_archive_entry(
                     q.get("game", "jp"), q.get("name", ""), body))

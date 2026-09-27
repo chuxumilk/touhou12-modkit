@@ -2,7 +2,9 @@
 """真实写入测试：跑一次「保存到游戏」，确认写到一半自检、写完整合都没问题。
 
 【重要】只在游戏目录的副本上跑（会真的改文件）。
-用法: python _test/verify_save.py <port> <gameDir>
+用法: python _test/verify_save.py <port> [gameDir]
+      gameDir 省略时读环境变量 TH12_GAME_DIR
+      （路径含空格时建议用环境变量，批处理里传参会把路径拆断）
 """
 import hashlib
 import json
@@ -15,6 +17,8 @@ import urllib.request
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8799
 GAME = sys.argv[2] if len(sys.argv) > 2 else ""
+if not GAME:
+    GAME = os.environ.get("TH12_GAME_DIR", "")
 BASE = "http://127.0.0.1:%d" % PORT
 
 PASS, FAIL = [], []
