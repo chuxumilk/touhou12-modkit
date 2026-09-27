@@ -14,6 +14,7 @@ const S = {
   lastComment: "",
   pendingCount: 0,
   settings: null,
+  pathEdited: false,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -154,16 +155,27 @@ async function openSettings() {
   modal.classList.remove("hidden");
   $("#settings-live").textContent = "";
   $("#settings-live").className = "live";
+  // 用户可能在 config 返回前就已经粘贴了路径：那就别再用旧值覆盖他的输入
+  S.pathEdited = false;
+  const wasEmpty = !$("#settings-path").value.trim();
   try {
     S.settings = await api("/api/config");
   } catch (e) { /* 用旧数据 */ }
+  if (S.pathEdited) {
+    // 期间用户自己动过输入框：保留他的内容，只刷新状态和候选
+    showCurrentDir();
+    renderCandidates();
+    return;
+  }
   showCurrentDir();
   const cur = (S.settings && S.settings.game_dir) || "";
-  $("#settings-path").value = cur;
+  if (wasEmpty || !$("#settings-path").value.trim()) {
+    $("#settings-path").value = cur;
+  }
   renderCandidates();
   // 当前目录本身是好的就不用提醒，否则立刻给出可操作提示
   if (!(S.settings && S.settings.games && S.settings.games.length)) {
-    validatePath(cur);
+    validatePath($("#settings-path").value.trim());
   }
 }
 
@@ -208,6 +220,7 @@ function renderCandidates() {
     div.appendChild(p);
     div.appendChild(tag);
     div.onclick = () => {
+      S.pathEdited = true;      // 点了候选就等于用户做了选择
       $("#settings-path").value = c.path;
       validatePath(c.path);
     };
@@ -238,8 +251,9 @@ async function validatePath(path) {
       // 目录能用，但数据有损坏（例如归档被写坏、thbgm 对不上）
       showLive("⚠ " + problems[0].split("\n")[0], "warn");
     } else if (r.ok) {
-      showLive("✓ 可用（" + (r.games || []).map(
-        (k) => (k === "jp" ? "日文版" : "汉化版")).join(" / ") + "）", "ok");
+      showLive("✓ " + "可用（" + (r.games || []).map(
+        (k) => (k === "jp" ? "日文版" : "汉化版")).join(" / ") + "）"
+        + (r.from_file ? "　已根据文件定位到目录" : ""), "ok");
     } else if (r.suggest) {
       showLive("⚠ 选到上一级了，游戏在：" + r.suggest
                + "（点「应用」会自动用它）", "warn");
@@ -260,7 +274,10 @@ function scheduleValidate() {
 $("#btn-settings").onclick = () => openSettings();
 $("#settings-cancel").onclick = () => $("#settings-modal").classList.add("hidden");
 $("#settings-modal").onclick = () => $("#settings-modal").classList.add("hidden");
-$("#settings-path").oninput = scheduleValidate;
+$("#settings-path").oninput = () => {
+  S.pathEdited = true;      // 记下「用户自己动过」，避免被旧的预填值覆盖
+  scheduleValidate();
+};
 
 $("#settings-rescan").onclick = async () => {
   const btn = $("#settings-rescan");
@@ -280,27 +297,32 @@ $("#settings-rescan").onclick = async () => {
   }
 };
 
-$("#settings-browse").onclick = async () => {
-  toast("请在弹窗中选择游戏文件夹…");
+async function pickWithDialog(kind) {
+  toast(kind === "file" ? "请在弹窗中选择 th12.dat / th12c.dat …"
+                        : "请在弹窗中选择游戏文件夹…");
   const cur = $("#settings-path").value.trim();
+  const url = "/api/pick-dir?kind=" + kind +
+              "&path=" + encodeURIComponent(cur);
   try {
-    const res = await api("/api/pick-dir?path=" + encodeURIComponent(cur),
-                          { method: "POST" });
+    const res = await api(url, { method: "POST" });
     if (res && res.path) {
       $("#settings-path").value = res.path;
-      validatePath(res.path);
+      await validatePath(res.path);
       toast("已选择：" + res.path);
     } else if (res && res.fallback) {
       $("#settings-path").value = res.fallback;
       validatePath(res.fallback);
       toast((res.error || "没能打开系统对话框") + "，已保留你填的路径", true);
     } else {
-      toast((res && res.error) || "没有选择文件夹（可以直接粘贴路径）", true);
+      toast((res && res.error) || "没有选择（可以直接粘贴路径）", true);
     }
   } catch (ex) {
     toast("打开选择框失败: " + ex.message + "（可以直接粘贴路径）", true);
   }
-};
+}
+
+$("#settings-browse").onclick = () => pickWithDialog("dir");
+$("#settings-browse-file").onclick = () => pickWithDialog("file");
 
 $("#settings-apply").onclick = async () => {
   const path = $("#settings-path").value.trim();

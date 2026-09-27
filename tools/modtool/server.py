@@ -1329,6 +1329,45 @@ def get_musiccmt(key):
 # ----------------------------------------------------------------------
 # 游戏目录 / 启动游戏
 # ----------------------------------------------------------------------
+# 用户可能直接把游戏数据文件拖/填进来，这里统一转成「目录」
+GAME_FILES = {}
+for _k, _info in GAMES.items():
+    GAME_FILES[_info["dat"].lower()] = _k
+# 顺带接受这些常见的同目录文件（避免用户指错文件就报错）
+EXTRA_FILES = ("thbgm.dat", "th12.exe", "th12c.exe", "custom.exe", "custom_cn.exe")
+
+
+def resolve_game_input(raw):
+    """把用户给的东西解析成游戏目录。
+
+    既支持「填目录」，也支持「填/选一个文件」——
+    很多人分不清该选哪一层，直接选 th12c.dat 反而最不容易错。
+
+    返回 (目录, 错误信息, 提示信息)。目录为 None 表示无法解析。
+    """
+    p = normalize_input_path(raw)
+    if not p:
+        return None, "请填写游戏目录，或者直接选/填 th12.dat、th12c.dat 文件", None
+
+    if os.path.isdir(p):
+        return p, None, None
+
+    if os.path.exists(p):                   # 存在但不是目录 → 当文件处理
+        name = os.path.basename(p).lower()
+        if name not in GAME_FILES and name not in EXTRA_FILES:
+            return None, ("这个文件不是 TH12 的游戏数据：%s\n"
+                          "请选 th12.dat（日文版）或 th12c.dat（汉化版），"
+                          "或者选它们所在的文件夹" % os.path.basename(p)), None
+        folder = os.path.dirname(p) or p
+        if check_game_dir(folder):
+            return folder, None, "已根据文件定位到目录：%s" % folder
+        return None, ("%s 所在的目录里没有 th12.dat / th12c.dat：\n%s\n"
+                      "可能选错了文件，或者游戏数据不完整"
+                      % (os.path.basename(p), folder)), None
+
+    return None, "目录或文件不存在：%s\n检查一下有没有打错，或者用「浏览…」选" % p, None
+
+
 def config_info():
     """设置弹窗需要的全部信息（当前目录、可用版本、exe、候选目录）。"""
     games = STATE.available_games()
@@ -1400,7 +1439,10 @@ def diagnose_game_dir(path, keys):
 
 
 def check_path_info(path):
-    """检查一个路径能不能当游戏目录，并给出可操作的提示（供前端实时校验）。"""
+    """检查一个路径能不能当游戏目录，并给出可操作的提示（供前端实时校验）。
+
+    既接受目录，也接受 th12.dat / th12c.dat 文件。
+    """
     raw = normalize_input_path(path)
     info = {
         "input": path,
@@ -1413,26 +1455,36 @@ def check_path_info(path):
         "message": "",
     }
     if not raw:
-        info["message"] = "请填写游戏目录（也可以用「浏览…」选文件夹）"
+        info["message"] = ("请填游戏目录，或者直接选 / 填 th12.dat、"
+                           "th12c.dat 文件（也可以用「浏览…」）")
         return info
-    if not os.path.isdir(raw):
-        info["message"] = "目录不存在：%s" % raw
+
+    resolved, err, note = resolve_game_input(raw)
+    if err:
+        info["message"] = err
+        info["exists"] = os.path.exists(raw)
         return info
+    if resolved != raw:
+        info["from_file"] = True
+    info["path"] = resolved
     info["exists"] = True
-    found = check_game_dir(raw)
+    found = check_game_dir(resolved)
     if found:
         info.update({"ok": True, "games": found,
                      "message": "可用版本：%s" % " / ".join(
                          GAMES[k]["label"] for k in found)})
         if len(found) > 1:
             info["message"] += "；日文版/汉化版共用 thbgm.dat"
-        info["problems"] = diagnose_game_dir(raw, found)
+        if note:
+            # 例如「已根据文件定位到目录：…」，另起一行，别和上面的状态挤在一起
+            info["message"] += "\n" + note
+        info["problems"] = diagnose_game_dir(resolved, found)
         if info["problems"]:
             info["message"] += "\n⚠ " + info["problems"][0].splitlines()[0]
         return info
 
     # 这里不是游戏目录：看看是不是「指到了上一级」，直接把正确路径找出来
-    sub = find_game_subdir(raw)
+    sub = find_game_subdir(resolved)
     if sub:
         games = check_game_dir(sub)
         info.update({"suggest": sub, "games": games})
@@ -1442,7 +1494,8 @@ def check_path_info(path):
         return info
     info["message"] = ("这个目录里没有 th12.dat 或 th12c.dat。\n"
                        "请选「里面直接放着 th12.dat / th12c.dat」"
-                       "的那个文件夹（不是它的上一级）。")
+                       "的那个文件夹（不是它的上一级），"
+                       "或者直接选那个 .dat 文件。")
     return info
 
 
@@ -1457,12 +1510,17 @@ def _remember_dir(path):
 
 
 def set_config(payload):
+    """设置游戏目录。可以给目录，也可以直接给 th12.dat / th12c.dat 文件。"""
     path = normalize_input_path(payload.get("game_dir"))
     if not path:
-        raise ApiError("请填写游戏目录")
-    if not os.path.isdir(path):
-        raise ApiError("目录不存在：%s\n"
-                       "检查一下有没有打错，或者用「浏览…」选文件夹。" % path)
+        raise ApiError("请填写游戏目录，或者直接选 / 填 th12.dat、th12c.dat 文件")
+
+    resolved, err, note = resolve_game_input(path)
+    if err:
+        raise ApiError(err)
+    from_file = resolved != path
+    path = resolved
+
     found = check_game_dir(path)
     suggest = None
     if not found:
@@ -1471,8 +1529,7 @@ def set_config(payload):
         if not suggest:
             raise ApiError(
                 "这个目录里没有 th12.dat 或 th12c.dat，不是 TH12 游戏目录。\n"
-                "要选的是「里面直接放着 th12.dat / th12c.dat」的文件夹"
-                "（不是它的上一级）。")
+                "可以选那个文件夹，或者直接选 th12.dat / th12c.dat 文件。")
         found = check_game_dir(suggest)
         path = suggest
 
@@ -1490,6 +1547,9 @@ def set_config(payload):
     log("切换游戏目录", GAME_DIR, "版本: %s" % "/".join(found))
     info = config_info()
     info["used_parent"] = bool(suggest)
+    info["from_file"] = from_file
+    if note:
+        info["message"] = note
     if suggest:
         info["suggest"] = suggest
         info["message"] = ("你选的目录里没有游戏数据，已自动改用里面的：\n%s"
@@ -1502,23 +1562,39 @@ def set_config(payload):
     return info
 
 
-def pick_directory(fallback=""):
-    """弹出一个 Windows 原生“选择文件夹”对话框（用 PowerShell，
-    源码运行和打包运行都能用）。
+def pick_directory(fallback="", kind="dir"):
+    """弹出 Windows 原生选择框（PowerShell，源码运行和打包运行都能用）。
+
+    kind="dir"  → 选文件夹
+    kind="file" → 选游戏数据文件（th12c.dat / th12.dat 等）
 
     打不开对话框时不再「静默返回空」，而是把原因告诉前端，
     并把 fallback（前端当前填的路径）原样带回，让用户继续手动输入。
     """
-    script = (
-        "Add-Type -AssemblyName System.Windows.Forms\r\n"
-        "$d = New-Object System.Windows.Forms.FolderBrowserDialog\r\n"
-        "$d.Description = '选择 TH12 游戏目录（里面有 th12.dat）'\r\n"
-        "$d.ShowNewFolderButton = $false\r\n"
-        "if ($d.ShowDialog() -eq "
-        "[System.Windows.Forms.DialogResult]::OK) "
-        "{ [Console]::Out.Write($d.SelectedPath) }\r\n"
-    )
-    tmp = os.path.join(STAGING_DIR, "pickdir.ps1")
+    if kind == "file":
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms\r\n"
+            "$d = New-Object System.Windows.Forms.OpenFileDialog\r\n"
+            "$d.Title = '选择游戏数据文件（th12.dat 或 th12c.dat）'\r\n"
+            "$d.Filter = 'TH12 游戏数据 (*.dat)|*.dat|所有文件 (*.*)|*.*'\r\n"
+            "$d.CheckFileExists = $true\r\n"
+            "if ($d.ShowDialog() -eq "
+            "[System.Windows.Forms.DialogResult]::OK) "
+            "{ [Console]::Out.Write($d.FileName) }\r\n"
+        )
+        tmp_name = "pickfile.ps1"
+    else:
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms\r\n"
+            "$d = New-Object System.Windows.Forms.FolderBrowserDialog\r\n"
+            "$d.Description = '选择 TH12 游戏目录（里面有 th12.dat）'\r\n"
+            "$d.ShowNewFolderButton = $false\r\n"
+            "if ($d.ShowDialog() -eq "
+            "[System.Windows.Forms.DialogResult]::OK) "
+            "{ [Console]::Out.Write($d.SelectedPath) }\r\n"
+        )
+        tmp_name = "pickdir.ps1"
+    tmp = os.path.join(STAGING_DIR, tmp_name)
     try:
         if not os.path.isdir(STAGING_DIR):
             os.makedirs(STAGING_DIR)
@@ -1527,21 +1603,34 @@ def pick_directory(fallback=""):
         out = subprocess.run(
             ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
              "-File", tmp],
-            capture_output=True, text=True, timeout=600)
+            capture_output=True, timeout=600)
     except subprocess.TimeoutExpired:
         return {"path": "", "fallback": fallback,
-                "error": "等待选择文件夹超时，请直接在输入框里粘贴路径"}
+                "error": "等待选择超时，请直接在输入框里粘贴路径"}
     except Exception as ex:
         return {"path": "", "fallback": fallback,
-                "error": "无法打开文件夹选择框: %s（可以直接粘贴路径）" % ex}
+                "error": "无法打开选择框: %s（可以直接粘贴路径）" % ex}
 
-    picked = (out.stdout or "").strip()
+    # 显式按 UTF-8 解码，避免系统代码页把中文路径解坏；
+    # 失败时再退回系统代码页，保证任何环境下都能拿到路径。
+    raw = out.stdout or b""
+    picked = ""
+    for enc in ("utf-8", "gbk", None):
+        try:
+            picked = raw.decode(enc) if enc else \
+                raw.decode(sys.getfilesystemencoding() or "utf-8", "replace")
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    picked = picked.strip().strip('"').strip()
     if picked:
-        return {"path": picked}
-    detail = (out.stderr or "").strip().splitlines()
-    reason = detail[-1] if detail else "没有选择文件夹"
+        return {"path": picked, "picked": ("file" if kind == "file"
+                                           else "dir")}
+    err_raw = out.stderr or b""
+    detail = err_raw.decode("utf-8", "replace").strip().splitlines()
+    reason = detail[-1] if detail else "没有选择"
     return {"path": "", "fallback": fallback,
-            "error": "未选择文件夹（%s）" % reason}
+            "error": "未选择（%s）" % reason}
 
 
 def launch_game(key=None):
@@ -2433,7 +2522,9 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(body.decode("utf-8") or "{}")
                 return self._json(set_config(payload))
             if route == "pick-dir":
-                return self._json(pick_directory(q.get("path", "")))
+                kind = "file" if (q.get("kind") or "").lower() == "file" \
+                    else "dir"
+                return self._json(pick_directory(q.get("path", ""), kind))
             if route == "launch":
                 return self._json(launch_game(q.get("game")))
             raise ApiError("未知接口: %s" % route, 404)

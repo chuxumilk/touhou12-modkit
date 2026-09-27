@@ -31,15 +31,17 @@
 
     <div id="settings-status" class="status">检查中…</div>
 
-    <p class="hint">要选的是 <b>里面直接放着</b> <code>th12.dat</code>（日文版）或
-      <code>th12c.dat</code>（汉化版）的那个文件夹；改音乐还需要
-      <code>thbgm.dat</code>。<br>
-      选到上一级也没关系，工具会自动找到里面的游戏目录。</p>
+    <p class="hint">两种都行：<b>选游戏目录</b>，或者<b>直接选 <code>th12.dat</code> /
+      <code>th12c.dat</code> 文件</b>（推荐后者，不用纠结该选哪一层）。<br>
+      目录方式要求 <code>th12.dat</code>（日文版）或 <code>th12c.dat</code>
+      （汉化版）直接躺在里面；改音乐还需要 <code>thbgm.dat</code>。<br>
+      选到上一级也没关系，工具会自动找到里面的游戏。</p>
 
     <div class="modal-row">
-      <input id="settings-path" type="text" placeholder="例如 D:\Games\th12"
+      <input id="settings-path" type="text" placeholder="例如 D:\Games\th12 或 D:\Games\th12\th12c.dat"
              spellcheck="false" autocomplete="off">
-      <button id="settings-browse" title="用系统对话框选文件夹">浏览…</button>
+      <button id="settings-browse" title="用系统对话框选文件夹">选目录…</button>
+      <button id="settings-browse-file" title="用系统对话框选 th12c.dat / th12.dat">选文件…</button>
     </div>
     <div id="settings-live" class="live"></div>
 
