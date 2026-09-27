@@ -1,0 +1,6 @@
+# Web 后端与格式库都只用标准库 + 以下两个包
+Pillow>=9.0
+numpy>=1.20
+
+# 可选：打包成 exe / 安装器时另需（见 tools/modtool/打包.bat）
+# pyinstaller>=5.0
