@@ -11,6 +11,7 @@ _recon/src/
 _recon/x_official/
 _recon/x_official_cn/
 _recon/testgame*/
+_recon/__pycache__/
 
 # ===== 运行时产物 =====
 tools/modtool/staging/
