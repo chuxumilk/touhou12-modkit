@@ -119,24 +119,3 @@ express Statement of Purpose.
  d. Affirmer understands and acknowledges that Creative Commons is not a
     party to this document and has no duty or obligation with respect to
     this CC0 or use of the Work.
-
----
-
-关于本仓库的说明（非 CC0 正式文本的一部分）
-
-本仓库的工具源代码（thtk/、tools/、_recon/、_test/ 等）由作者以 CC0 1.0
-进行公共领域奉献（Public Domain Dedication），在法律允许的最大范围内
-放弃全部著作权及相关权利。你可以任意使用、修改、分发，包括商业用途，
-无需署名、无需保留任何声明。
-
-但请注意：
-
-1. 《东方星莲船》游戏本体及其资源（贴图、音乐、文本、程序等）
-   版权归原作者 ZUN / 上海爱丽丝幻乐团所有，不在 CC0 的范围内。
-   本仓库不包含、也不分发任何游戏资源，请使用自己合法持有的游戏文件。
-
-2. 格式信息参考了 thtk (Touhou Toolkit) 的开源实现
-   （https://github.com/thpatch/thtk），该项目的许可条款独立于本仓库。
-
-3. 本作品按「原样」提供，不附带任何形式的担保（详见上面第 4 条 b 款）。
-   修改游戏文件有风险，请自行做好备份。
