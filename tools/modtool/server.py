@@ -226,10 +226,21 @@ GAMES = {
 BGM_DAT = os.path.join(GAME_DIR, "thbgm.dat")
 
 
+def normalize_input_path(path):
+    """整理用户填的路径：去空白/去引号/去掉 \\\\?\\ 长路径前缀。"""
+    p = (path or "").strip().strip('"').strip()
+    # 复制路径时可能带上 "\\?\" 或 "\\.\" 前缀，去掉才能当普通路径用
+    if p.startswith("\\\\?\\UNC\\"):
+        p = "\\\\" + p[8:]
+    elif p.startswith("\\\\?\\") or p.startswith("\\\\.\\"):
+        p = p[4:]
+    return p.strip()
+
+
 def set_game_dir(path):
     """切换游戏目录（便于测试/多份游戏）。"""
     global GAME_DIR, BGM_DAT
-    GAME_DIR = os.path.abspath(path)
+    GAME_DIR = os.path.abspath(normalize_input_path(path))
     BGM_DAT = os.path.join(GAME_DIR, "thbgm.dat")
 
 
@@ -242,48 +253,374 @@ def load_config():
 
 
 def save_config(cfg):
+    """写配置文件。写失败时返回错误字符串（以前是静默吞掉，用户看不到）。"""
     try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        if not os.path.isdir(DATA_DIR):
+            os.makedirs(DATA_DIR)
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+        os.replace(tmp, CONFIG_PATH)
+        return None
+    except Exception as ex:
+        return "%s（配置路径：%s）" % (ex, CONFIG_PATH)
 
 
 def check_game_dir(path):
     """返回该目录里可用的版本列表；空列表表示不是 TH12 游戏目录。"""
     found = []
     for key, info in GAMES.items():
-        if os.path.isfile(os.path.join(path, info["dat"])):
-            found.append(key)
+        try:
+            if os.path.isfile(os.path.join(path, info["dat"])):
+                found.append(key)
+        except OSError:
+            pass
     return found
 
 
-def find_candidates():
-    """在常见位置找有 th12.dat / th12c.dat 的目录。"""
+# 扫描时跳过这些目录（体积大 / 与游戏无关）
+SKIP_DIRS = {
+    "$recycle.bin", "system volume information", "windows", "winsxs",
+    "node_modules", ".git", "__pycache__", "appdata", "program files",
+    "program files (x86)", "programdata", "$windows.~bt", "$windows.~ws",
+}
+
+
+# 目录名里出现这些词就先扫（游戏目录一般躲在这些名字下面）
+PRIORITY_WORDS = (
+    "th12", "touhou", "东方", "游戏", "game", "games", "stg", "弹幕",
+    "东方project", "同人", "魔改", "mod",
+)
+
+
+def _priority(name):
+    """越小越先扫。命中关键词的排前面，纯数字序号目录次之。"""
+    low = name.lower()
+    for i, w in enumerate(PRIORITY_WORDS):
+        if w in low:
+            return i
+    return len(PRIORITY_WORDS)
+
+
+def _subdirs(path, use_priority=False):
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if name.lower() in SKIP_DIRS or name.startswith("$"):
+            continue
+        sub = os.path.join(path, name)
+        try:
+            if os.path.isdir(sub):
+                out.append(sub)
+        except OSError:
+            pass
+    if use_priority:
+        out.sort(key=lambda p: (_priority(os.path.basename(p)),
+                                len(os.path.basename(p))))
+    return out
+
+
+def scan_for_games(root, depth=2, budget=None, priority=False):
+    """在 root 下按 depth 层扫描真正的游戏目录。
+
+    返回 [{"path":..., "games":[...], "depth":n}]。
+    只下探目录，不读取 .dat 内容；priority=True 时先扫名字像游戏的目录，
+    这样即使预算用完，也大概率已经把游戏找到了。
+    """
+    if budget is None:
+        budget = [1200]                      # 最多检查这么多个目录
+    found = []
+    if not root or not os.path.isdir(root):
+        return found
+
+    def walk(path, level):
+        if budget[0] <= 0:
+            return
+        budget[0] -= 1
+        games = check_game_dir(path)
+        if games:
+            found.append({"path": path, "games": games, "depth": level})
+            if level > 0:
+                return                       # 已经是游戏目录，不再往里钻
+        if level >= depth:
+            return
+        for sub in _subdirs(path, use_priority=priority):
+            if budget[0] <= 0:
+                return
+            walk(sub, level + 1)
+
+    # root 本身也算第 0 层
+    walk(root, 0)
+    return found
+
+
+def _scan_roots(include_drives=True):
+    """生成扫描起点列表（常见位置 + 用过的目录 + 盘符根目录）。"""
     roots = [
         os.path.join(EXE_DIR, "game"),
         EXE_DIR,
+        os.getcwd(),
         os.path.dirname(EXE_DIR),
         os.path.dirname(os.path.dirname(EXE_DIR)),
-        os.getcwd(),
     ]
+    cfg = load_config()
+    for key in ("game_dir", "last_dir"):
+        p = cfg.get(key)
+        if p and os.path.isdir(p):
+            roots.append(p)
+            roots.append(os.path.dirname(p))
+            roots.append(os.path.dirname(os.path.dirname(p)))
+    for key in ("recent_dirs", "known_dirs"):
+        for p in cfg.get(key) or []:
+            if os.path.isdir(p):
+                roots.append(p)
+    if include_drives:
+        for drive in ("D:", "E:", "F:", "C:"):
+            if os.path.isdir(drive + "\\"):
+                roots.append(drive + "\\")
+    return roots
+
+
+# 候选目录缓存：开弹窗会频繁调 /api/config，扫描结果缓存 60 秒
+_CAND_CACHE = {"time": 0.0, "items": [], "deep": False}
+_CAND_TTL = 60.0
+
+
+def find_candidates(deep=False, force=False):
+    """自动查找候选游戏目录。
+
+    - 已知位置（工作目录、游戏目录的上级、用过的目录、盘符下名字像游戏的目录）
+      做有限深度遍历
+    - deep=True（用户点「重新扫描」）时会做一次限时的全盘遍历，
+      并优先用 Everything（若装了）
+    - 整个过程有时间上限，绝不把网页卡住
+    - 结果缓存，避免每次开设置弹窗都扫一遍磁盘
+    """
+    now = time.time()
+    if (not force and _CAND_CACHE["items"]
+            and (now - _CAND_CACHE["time"] < _CAND_TTL)
+            and (not deep or _CAND_CACHE["deep"])):
+        return _CAND_CACHE["items"]
+
+    budget_s = 25.0 if deep else 2.5
+    deadline = time.time() + budget_s
     out = []
     seen = set()
-    for root in roots:
-        if not os.path.isdir(root):
+    roots_done = set()
+
+    def add(path, games, level=0):
+        key = os.path.abspath(path).lower()
+        if key in seen or not games:
+            return
+        seen.add(key)
+        out.append({"path": path, "games": games, "depth": level})
+
+    # ① 装了 Everything 的话，这一步基本就直接找到了
+    for d in _by_everything(["th12.exe", "th12c.exe", "th12.dat", "th12c.dat"]):
+        add(d, check_game_dir(d))
+
+    # ② 已知位置 + 盘符下「名字像游戏」的目录（放前面扫描）
+    for root in _scan_roots(include_drives=False):
+        if time.time() > deadline:
+            break
+        real = os.path.abspath(root).lower()
+        if real in roots_done or not os.path.isdir(root):
+            continue
+        roots_done.add(real)
+        for item in scan_for_games(root, depth=3, priority=True,
+                                   budget=[600]):
+            add(item["path"], item["games"], item["depth"])
+    for top in _drive_top_folders(deep=deep):
+        if time.time() > deadline:
+            break
+        real = os.path.abspath(top).lower()
+        if real in roots_done:
+            continue
+        roots_done.add(real)
+        for item in scan_for_games(top, depth=4, priority=True,
+                                   budget=[1500]):
+            add(item["path"], item["games"], item["depth"])
+
+    # ③ 还差得远就接着在全盘里按名字优先级找（限时）
+    if (len(out) < 3 or deep) and time.time() < deadline:
+        depth = 6 if deep else 3
+        for drive in ("D:", "E:", "C:", "F:"):
+            if time.time() > deadline:
+                break
+            if not os.path.isdir(drive + "\\"):
+                continue
+            fast_walk(drive + "\\", deadline, depth=depth,
+                      on_game=lambda p, g: add(p, g, 4))
+
+    cur = GAME_DIR.lower()
+    out.sort(key=lambda it: (os.path.abspath(it["path"]).lower() != cur,
+                             it["depth"]))
+    _CAND_CACHE.update({"time": now, "items": out, "deep": deep})
+    return out
+    _CAND_CACHE.update({"time": now, "items": out, "deep": deep})
+    return out
+
+
+def _everything_exe():
+    """找 Everything 的命令行工具 es.exe（有的话搜索是毫秒级的）。"""
+    cands = []
+    for p in (os.environ.get("PATH") or "").split(os.pathsep):
+        if p:
+            cands.append(os.path.join(p, "es.exe"))
+    for base in (os.environ.get("ProgramFiles") or r"C:\Program Files",
+                 os.environ.get("ProgramFiles(x86)") or "",
+                 os.environ.get("LOCALAPPDATA") or "",
+                 r"C:\Program Files\Everything",
+                 r"C:\Program Files (x86)\Everything",
+                 r"C:\tools"):
+        if base:
+            cands.append(os.path.join(base, "Everything", "es.exe"))
+            cands.append(os.path.join(base, "es.exe"))
+    for c in cands:
+        try:
+            if os.path.isfile(c):
+                return c
+        except OSError:
+            pass
+    return None
+
+
+def _by_everything(names, timeout=20):
+    """用 Everything 按文件名反查目录（只有装了 Everything 才有）。"""
+    es = _everything_exe()
+    if not es:
+        return []
+    dirs = []
+    for name in names:
+        try:
+            r = subprocess.run([es, "-f", name], capture_output=True,
+                               timeout=timeout)
+        except Exception:
+            continue
+        for ln in (r.stdout or b"").decode("utf-8", "replace").splitlines():
+            ln = ln.strip().strip('"')
+            if ln:
+                dirs.append(os.path.dirname(ln))
+    return [d for d in dirs if d and os.path.isdir(d)]
+
+
+def fast_walk(root, deadline, depth=3, on_game=None):
+    """快速遍历（os.scandir + 时限），用来在全盘里找游戏目录。
+
+    - deadline: time.time() 的绝对时限，超时立刻返回（调用方保证不卡）
+    - 名字像游戏的目录先扫，所以即使被时限截断也大概率已经找到
+    """
+    stack = [(root, 0)]
+    while stack:
+        if time.time() > deadline:
+            return
+        path, level = stack.pop()
+        games = check_game_dir(path)
+        if games and level > 0:
+            if on_game:
+                on_game(path, games)
+            continue
+        if level >= depth:
             continue
         try:
-            names = os.listdir(root)
+            with os.scandir(path) as it:
+                subs = []
+                for e in it:
+                    try:
+                        if not e.is_dir(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    if e.name.lower() in SKIP_DIRS or e.name.startswith("$"):
+                        continue
+                    subs.append(e.path)
         except OSError:
             continue
-        for name in names:
-            path = os.path.join(root, name)
-            if not os.path.isdir(path) or path in seen:
-                continue
-            if check_game_dir(path):
-                seen.add(path)
-                out.append(path)
-    return out
+        # 先扫名字像游戏的（注意 stack 是后进先出，所以按优先级倒序压栈）
+        subs.sort(key=lambda p: (_priority(os.path.basename(p)),
+                                 len(os.path.basename(p))), reverse=True)
+        for sub in subs:
+            stack.append((sub, level + 1))
+
+
+def _drive_top_folders(deep=False):
+    """盘符下「名字像游戏」的那一两个文件夹，用于深扫一层。"""
+    tops = []
+    for drive in ("D:", "E:", "F:", "C:"):
+        if not os.path.isdir(drive + "\\"):
+            continue
+        for sub in _subdirs(drive + "\\", use_priority=True)[:4]:
+            tops.append(sub)
+    return tops
+
+
+def find_game_subdir(path, max_nodes=800):
+    """在 path 里（最多下探 2 层）找真正装着游戏的子目录。
+
+    用户很容易把目录指到「上一级」（例如选到 game\\ 而不是
+    game\\[th12] 东方星莲船\\），这里直接把正确路径找出来。
+    """
+    if not path or not os.path.isdir(path):
+        return None
+    nodes = [0]
+
+    def walk(cur, level):
+        if nodes[0] > max_nodes or level > 2:
+            return None
+        for sub in _subdirs(cur, use_priority=True):
+            nodes[0] += 1
+            if nodes[0] > max_nodes:
+                return None
+            if check_game_dir(sub):
+                return sub
+            if level < 2:
+                hit = walk(sub, level + 1)
+                if hit:
+                    return hit
+        return None
+
+    return walk(path, 0)
+
+
+def rescan_candidates(deep=True):
+    """用户在弹窗里点「重新扫描」时调用。"""
+    with STATE.lock:
+        _CAND_CACHE["items"] = []
+        _CAND_CACHE["time"] = 0.0
+    items = find_candidates(deep=deep, force=True)
+    # 记住这次（更深）的结果，保证紧接着的 /api/config 用的是新列表
+    _CAND_CACHE.update({"time": time.time(), "items": items, "deep": deep})
+    return {"candidates": items, "count": len(items)}
+
+
+def _warm_candidates():
+    """启动时后台预热候选目录：先快扫一遍，再深扫一遍。
+
+    这样第一次开设置弹窗马上就有列表（快扫结果），
+    稍后自动补上藏在深处的那几份；用户也可以随时点「重新扫描」。
+    """
+    try:
+        find_candidates(deep=False, force=True)
+        time.sleep(0.5)
+        rescan_candidates(deep=True)
+    except Exception:
+        pass
+
+
+def _bg_refresh_candidates():
+    """后台刷新候选缓存（不清空，先让接口用旧结果秒回）。"""
+    def work():
+        try:
+            time.sleep(0.2)
+            items = find_candidates(deep=False, force=True)
+            _CAND_CACHE.update({"time": time.time(), "items": items,
+                                "deep": False})
+        except Exception:
+            pass
+    threading.Thread(target=work, daemon=True).start()
 
 
 # ----------------------------------------------------------------------
@@ -389,6 +726,7 @@ class State(object):
         self.bgm_pending = {}     # index -> 暂存的 PCM 文件路径
         self.bgm_loop = {}        # index -> 新的循环点（字节）
         self.bgm_replaced = set()
+        self.bgm_error = {}       # key -> 上次读取失败的原因
         self.jobs = {}
         self.job_seq = 0
         self.game_key = "jp"
@@ -434,16 +772,41 @@ class State(object):
             self.texture_index = {}
             self.archives = {}
             self.fmt = None
+            self.bgm_error = {}
 
     # -- BGM ---------------------------------------------------------
     def bgm_fmt(self):
+        """读取 thbgm.fmt。
+
+        游戏数据损坏时（例如归档被写坏、条目被截断）这里会抛错。错误会被
+        记住，避免每次请求都去做一遍昂贵的失败读取；换目录时会清空。
+        """
         if self.fmt is None:
             games = self.available_games()
             if not games:
                 raise ApiError("游戏目录里没有 th12.dat / th12c.dat")
-            data = self.archive(games[0]).read_by_name("thbgm.fmt")
-            self.fmt = bgm.BgmFmt.from_bytes(data)
+            key = games[0]
+            if key in self.bgm_error:
+                raise ApiError(self.bgm_error[key])
+            try:
+                data = self.archive(key).read_by_name("thbgm.fmt")
+                self.fmt = bgm.BgmFmt.from_bytes(data)
+            except ApiError:
+                raise
+            except Exception as ex:
+                msg = ("读不出 thbgm.fmt（音乐数据可能已损坏）：%s\n"
+                       "贴图 / 对话仍然可以正常修改，只是音乐页用不了。"
+                       % ex)
+                self.bgm_error[key] = msg
+                raise ApiError(msg)
         return self.fmt
+
+    def bgm_status(self):
+        """音乐信息（失败时返回错误文本，不抛异常），供 /api/state 使用。"""
+        try:
+            return list_bgm(), None
+        except Exception as ex:
+            return None, str(ex)
 
     # -- 任务 --------------------------------------------------------
     def new_job(self):
@@ -824,6 +1187,8 @@ def _apply_bgm(job):
         path = STATE.archive_path(key) + ".new"
         with open(path, "wb") as f:
             f.write(blob)
+            f.flush()
+            os.fsync(f.fileno())
         new_archives[key] = path
     # 4) 备份 + 原子替换
     job["message"] = "正在备份原文件…"
@@ -964,45 +1329,186 @@ def get_musiccmt(key):
 # ----------------------------------------------------------------------
 # 游戏目录 / 启动游戏
 # ----------------------------------------------------------------------
-def get_config():
+def config_info():
+    """设置弹窗需要的全部信息（当前目录、可用版本、exe、候选目录）。"""
     games = STATE.available_games()
     exes = {}
     for key in games:
         exe = os.path.join(GAME_DIR, "th12.exe" if key == "jp"
                            else "th12c.exe")
         exes[key] = os.path.basename(exe) if os.path.isfile(exe) else None
+    cfg = load_config()
     return {
         "game_dir": GAME_DIR,
+        "dir_exists": os.path.isdir(GAME_DIR),
         "games": [{"key": k, "label": GAMES[k]["label"]} for k in games],
         "exes": exes,
         "candidates": find_candidates(),
+        "config_path": CONFIG_PATH,
+        "problems": diagnose_game_dir(GAME_DIR, games) if games else [],
+        "recent_dirs": [p for p in (cfg.get("recent_dirs") or [])
+                        if os.path.isdir(p)],
     }
 
 
+def diagnose_game_dir(path, keys):
+    """体检一个游戏目录：归档数据能不能真的读出来。
+
+    要点：`size` 是解压后的大小，数据在文件里只占 `zsize`，所以
+    「offset+size 超出文件」并不代表损坏（压缩数据没占那么多）。
+    只有**真的读失败**（数据被截断 / 解压报错）才算坏。
+
+    为了快，只抽查几个小条目 + 当前要用到的 thbgm.fmt，不整包解压。
+    """
+    problems = []
+    for key in keys:
+        dat = os.path.join(path, GAMES[key]["dat"])
+        label = GAMES[key]["label"]
+        try:
+            size = os.path.getsize(dat)
+        except OSError as ex:
+            problems.append("%s 读不到：%s" % (label, ex))
+            continue
+        try:
+            ar = archive.Archive.from_file(dat)
+        except Exception as ex:
+            problems.append("%s 归档解析失败：%s" % (label, ex))
+            continue
+
+        # ① offset 本身就落在文件外的，铁定坏了（不用读就知道）
+        beyond = [e for e in ar.entries if e.offset >= size]
+        if beyond:
+            names = "、".join(e.name for e in beyond[:3])
+            problems.append("%s 有 %d 个条目的位置超出文件末尾（%s …），"
+                            "归档像是写到一半中断了"
+                            % (label, len(beyond), names))
+            continue
+
+        # ② 抽查：thbgm.fmt（音乐要用）+ 最小的几个条目，真正读一次
+        picked = [e for e in ar.entries if e.name == "thbgm.fmt"]
+        small = sorted((e for e in ar.entries if e.name != "thbgm.fmt"),
+                       key=lambda e: e.zsize)[:5]
+        for e in picked + small:
+            try:
+                ar.read_by_name(e.name)
+            except Exception as ex:
+                problems.append("%s 里的 %s 读不出来：%s\n"
+                                "（归档可能被写坏，建议用备份文件还原）"
+                                % (label, e.name, ex))
+                break
+    return problems
+
+
+def check_path_info(path):
+    """检查一个路径能不能当游戏目录，并给出可操作的提示（供前端实时校验）。"""
+    raw = normalize_input_path(path)
+    info = {
+        "input": path,
+        "path": raw,
+        "ok": False,
+        "games": [],
+        "exists": False,
+        "suggest": None,
+        "problems": [],
+        "message": "",
+    }
+    if not raw:
+        info["message"] = "请填写游戏目录（也可以用「浏览…」选文件夹）"
+        return info
+    if not os.path.isdir(raw):
+        info["message"] = "目录不存在：%s" % raw
+        return info
+    info["exists"] = True
+    found = check_game_dir(raw)
+    if found:
+        info.update({"ok": True, "games": found,
+                     "message": "可用版本：%s" % " / ".join(
+                         GAMES[k]["label"] for k in found)})
+        if len(found) > 1:
+            info["message"] += "；日文版/汉化版共用 thbgm.dat"
+        info["problems"] = diagnose_game_dir(raw, found)
+        if info["problems"]:
+            info["message"] += "\n⚠ " + info["problems"][0].splitlines()[0]
+        return info
+
+    # 这里不是游戏目录：看看是不是「指到了上一级」，直接把正确路径找出来
+    sub = find_game_subdir(raw)
+    if sub:
+        games = check_game_dir(sub)
+        info.update({"suggest": sub, "games": games})
+        info["message"] = ("这个目录本身没有 th12.dat / th12c.dat，"
+                           "但里面有一份游戏：\n%s" % sub)
+        info["problems"] = diagnose_game_dir(sub, games)
+        return info
+    info["message"] = ("这个目录里没有 th12.dat 或 th12c.dat。\n"
+                       "请选「里面直接放着 th12.dat / th12c.dat」"
+                       "的那个文件夹（不是它的上一级）。")
+    return info
+
+
+def _remember_dir(path):
+    """记住用过的目录，方便下次直接在候选里点。"""
+    cfg = load_config()
+    recent = [p for p in (cfg.get("recent_dirs") or [])
+              if os.path.isdir(p) and os.path.abspath(p) != os.path.abspath(path)]
+    recent.insert(0, os.path.abspath(path))
+    cfg["recent_dirs"] = recent[:8]
+    save_config(cfg)
+
+
 def set_config(payload):
-    path = (payload.get("game_dir") or "").strip().strip('"')
+    path = normalize_input_path(payload.get("game_dir"))
     if not path:
         raise ApiError("请填写游戏目录")
     if not os.path.isdir(path):
-        raise ApiError("目录不存在: %s" % path)
+        raise ApiError("目录不存在：%s\n"
+                       "检查一下有没有打错，或者用「浏览…」选文件夹。" % path)
     found = check_game_dir(path)
+    suggest = None
     if not found:
-        raise ApiError("这个目录里没有 th12.dat 或 th12c.dat，"
-                       "不是 TH12 游戏目录")
+        # 允许指到「里面装着游戏的那一层」，但要把真正用的目录回给前端
+        suggest = find_game_subdir(path)
+        if not suggest:
+            raise ApiError(
+                "这个目录里没有 th12.dat 或 th12c.dat，不是 TH12 游戏目录。\n"
+                "要选的是「里面直接放着 th12.dat / th12c.dat」的文件夹"
+                "（不是它的上一级）。")
+        found = check_game_dir(suggest)
+        path = suggest
+
     with STATE.lock:
         set_game_dir(path)
         STATE.invalidate()
         STATE.game_key = found[0]
+    _remember_dir(path)
     cfg = load_config()
     cfg["game_dir"] = GAME_DIR
-    save_config(cfg)
+    warn = save_config(cfg)
+    # 注意：这里【不能】清空候选缓存——那会让本次请求变成 2~3 秒的磁盘全盘扫描。
+    # 改成后台悄悄刷新，接口本身毫秒级返回。
+    _bg_refresh_candidates()
     log("切换游戏目录", GAME_DIR, "版本: %s" % "/".join(found))
-    return get_config()
+    info = config_info()
+    info["used_parent"] = bool(suggest)
+    if suggest:
+        info["suggest"] = suggest
+        info["message"] = ("你选的目录里没有游戏数据，已自动改用里面的：\n%s"
+                           % suggest)
+    if info.get("problems"):
+        info["warning"] = "；".join(p.splitlines()[0] for p in info["problems"])
+    if warn:
+        info["config_warning"] = ("目录已生效，但配置没能保存，"
+                                  "下次启动会恢复成默认：%s" % warn)
+    return info
 
 
-def pick_directory():
+def pick_directory(fallback=""):
     """弹出一个 Windows 原生“选择文件夹”对话框（用 PowerShell，
-    源码运行和打包运行都能用）。"""
+    源码运行和打包运行都能用）。
+
+    打不开对话框时不再「静默返回空」，而是把原因告诉前端，
+    并把 fallback（前端当前填的路径）原样带回，让用户继续手动输入。
+    """
     script = (
         "Add-Type -AssemblyName System.Windows.Forms\r\n"
         "$d = New-Object System.Windows.Forms.FolderBrowserDialog\r\n"
@@ -1021,10 +1527,21 @@ def pick_directory():
         out = subprocess.run(
             ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass",
              "-File", tmp],
-            capture_output=True, text=True, timeout=900)
+            capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return {"path": "", "fallback": fallback,
+                "error": "等待选择文件夹超时，请直接在输入框里粘贴路径"}
     except Exception as ex:
-        raise ApiError("无法打开文件夹选择框: %s" % ex)
-    return {"path": (out.stdout or "").strip()}
+        return {"path": "", "fallback": fallback,
+                "error": "无法打开文件夹选择框: %s（可以直接粘贴路径）" % ex}
+
+    picked = (out.stdout or "").strip()
+    if picked:
+        return {"path": picked}
+    detail = (out.stderr or "").strip().splitlines()
+    reason = detail[-1] if detail else "没有选择文件夹"
+    return {"path": "", "fallback": fallback,
+            "error": "未选择文件夹（%s）" % reason}
 
 
 def launch_game(key=None):
@@ -1732,12 +2249,15 @@ class Handler(BaseHTTPRequestHandler):
                 })
             if STATE.game_key not in games:
                 STATE.game_key = games[0]
+            # 音乐信息单独取：数据损坏时降级成警告，不能让整个页面打不开
+            bgm_info, bgm_err = STATE.bgm_status()
             return self._json({
                 "games": [{"key": k, "label": GAMES[k]["label"]}
                           for k in games],
                 "default_game": STATE.game_key,
                 "game_dir": GAME_DIR,
-                "bgm": list_bgm(),
+                "bgm": bgm_info,
+                "bgm_error": bgm_err,
                 "backups": list_backups()["backups"],
             })
         if route == "archive":
@@ -1835,7 +2355,12 @@ class Handler(BaseHTTPRequestHandler):
                               {"Content-Disposition":
                                "attachment; filename*=UTF-8''%s" % fname})
         if route == "config":
-            return self._json(get_config())
+            return self._json(config_info())
+        if route == "check":
+            # 实时校验用户在弹窗里填的路径（不写入任何东西）
+            return self._json(check_path_info(q.get("path", "")))
+        if route == "rescan":
+            return self._json(rescan_candidates(deep=True))
         raise ApiError("未知接口: %s" % route, 404)
 
     # ---- POST -----------------------------------------------------
@@ -1908,7 +2433,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(body.decode("utf-8") or "{}")
                 return self._json(set_config(payload))
             if route == "pick-dir":
-                return self._json(pick_directory())
+                return self._json(pick_directory(q.get("path", "")))
             if route == "launch":
                 return self._json(launch_game(q.get("game")))
             raise ApiError("未知接口: %s" % route, 404)
@@ -1954,8 +2479,14 @@ def main():
     cfg = load_config()
     if args.game_dir:
         set_game_dir(args.game_dir)
-    elif cfg.get("game_dir") and os.path.isdir(cfg["game_dir"]):
-        set_game_dir(cfg["game_dir"])
+    elif cfg.get("game_dir"):
+        saved = cfg["game_dir"]
+        if check_game_dir(saved) or find_game_subdir(saved):
+            # 目录还在（或只是指到了上一级）就用它；已失效则忽略，
+            # 回落到默认目录，避免弹窗里一直预填一个死路径
+            set_game_dir(saved)
+        else:
+            print("上次的游戏目录已失效，已忽略: %s" % saved)
     if cfg.get("last_game"):
         STATE.game_key = cfg["last_game"]
 
@@ -1970,6 +2501,8 @@ def main():
     httpd.daemon_threads = True
     # 后台预热贴图索引（首次要解压全部 .anm，之后走磁盘缓存）
     threading.Thread(target=warm_up_texture_index, daemon=True).start()
+    # 后台预热候选目录扫描，这样第一次打开「设置目录」不用等
+    threading.Thread(target=_warm_candidates, daemon=True).start()
     url = "http://127.0.0.1:%d/" % args.port
     print("=" * 56)
     print("  东方星莲船 魔改工具")

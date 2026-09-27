@@ -1,5 +1,8 @@
 # ===== 游戏本体与数据（体积大，不入库）=====
+# game/ 是默认游戏目录；测试/ 是自备的测试副本（两份都可能上百 MB）
 game/
+测试/
+test/
 
 # ===== 逆向调研中的第三方源码 / 构建产物 / 解包结果 =====
 _recon/build-thtk/
@@ -30,3 +33,12 @@ tools/modtool/dist-setup/
 tools/modtool/build/
 tools/modtool/build-setup/
 *.spec
+
+# ===== 本地临时验证（假游戏目录 / Chrome 配置等）=====
+_test/gameA/
+_test/gameB/
+_test/gameNoBgm/
+_test/fakegame/
+_test/notagame/
+_test/chrome-profile*/
+_test/*.orig

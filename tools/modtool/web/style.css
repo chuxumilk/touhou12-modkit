@@ -412,15 +412,69 @@ main { flex: 1; min-height: 0; display: flex; }
 .modal .hint { margin: 8px 0 16px; }
 .modal-row { display: flex; gap: 10px; }
 .modal-row input { flex: 1; font-family: Consolas, monospace; }
-.candidates { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+
+/* 当前目录状态条 */
+.status {
+  white-space: pre-wrap; word-break: break-all;
+  font-size: 12.5px; line-height: 1.65;
+  padding: 10px 12px; margin-bottom: 12px; border-radius: 8px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-left: 3px solid var(--line); color: var(--muted);
+}
+.status.ok   { border-left-color: var(--green); color: var(--text); }
+.status.err  { border-left-color: var(--accent); color: var(--text); }
+.status.warn { border-left-color: #d8a33a; color: var(--text); }
+
+/* 输入框下方的实时校验结果 */
+.live {
+  font-size: 12px; line-height: 1.6; margin-top: 8px;
+  word-break: break-all; min-height: 0;
+}
+.live:empty { display: none; }
+.live.ok   { color: var(--green); }
+.live.err  { color: var(--accent); }
+.live.warn { color: #d8a33a; }
+
+.cand-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 16px; font-size: 12px; color: var(--muted);
+}
+.cand-head .mini {
+  font-size: 11.5px; padding: 4px 10px; border-radius: 6px;
+}
+.cand-empty {
+  font-size: 12px; line-height: 1.7; color: var(--muted);
+  padding: 10px 12px; border: 1px dashed var(--line); border-radius: 8px;
+}
+.candidates {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 8px; max-height: 34vh; overflow-y: auto;
+}
 .candidates .cand {
+  display: flex; align-items: center; gap: 10px;
   font-size: 12px; color: var(--blue); cursor: pointer;
   padding: 7px 11px; border-radius: 7px; background: var(--panel-2);
-  border: 1px solid var(--line); word-break: break-all;
-  font-family: Consolas, monospace; transition: .12s;
+  border: 1px solid var(--line); transition: .12s;
+}
+.candidates .cand .cand-path {
+  flex: 1; word-break: break-all; font-family: Consolas, monospace;
+}
+.candidates .cand .cand-tag {
+  flex: none; font-size: 11px; padding: 2px 7px; border-radius: 999px;
+  background: var(--panel-3); color: var(--muted); border: 1px solid var(--line);
 }
 .candidates .cand:hover { background: var(--panel-3); border-color: #46536b; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+
+/* 需要设置目录时，让按钮更显眼 */
+#btn-settings.attention {
+  border-color: var(--accent); color: var(--accent);
+  animation: attention-pulse 1.6s ease-in-out infinite;
+}
+@keyframes attention-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(224, 92, 92, 0); }
+  50%      { box-shadow: 0 0 0 3px rgba(224, 92, 92, .22); }
+}
 
 /* ---------------- 小屏 ---------------- */
 @media (max-width: 860px) {

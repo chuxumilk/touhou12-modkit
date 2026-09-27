@@ -321,10 +321,14 @@ class Archive(object):
         return header + b"".join(payloads) + list_z
 
     def save(self, path):
+        """整包重写到 ``path``（原子替换 + 写完自检）。"""
         blob = self.to_bytes()
+        self._verify_blob(blob, path)
         tmp = path + ".tmp"
         with open(tmp, "wb") as f:
             f.write(blob)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
         self.path = path
         return len(blob)
@@ -391,11 +395,15 @@ class Archive(object):
         return bytes(header) + b"".join(payloads) + list_z
 
     def save_patched(self, path, replacements, compress=False):
-        """增量保存到 ``path``（原子替换）。"""
+        """增量保存到 ``path``（原子替换 + 写完自检）。"""
         blob = self.to_bytes_patched(replacements, compress=compress)
+        # 写之前先自检：确认生成的数据本身是自洽的
+        self._verify_blob(blob, path)
         tmp = path + ".tmp"
         with open(tmp, "wb") as f:
             f.write(blob)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
         # 重新载入，保持内存状态与磁盘一致
         fresh = Archive.from_bytes(blob, source=path)
@@ -406,3 +414,21 @@ class Archive(object):
         self.list_zsize = fresh.list_zsize
         self._reindex()
         return len(blob)
+
+    @staticmethod
+    def _verify_blob(blob, path):
+        """写完自检：条目表必须能解析，而且每个条目都要落在文件范围内。
+
+        这样宁可报错、保留原文件，也不会写出一份「打不开」的归档。
+        """
+        size = len(blob)
+        fresh = Archive.from_bytes(blob, source=path)
+        bad = [e for e in fresh.entries if e.offset < 0 or e.offset >= size]
+        if bad:
+            raise ArchiveError(
+                "生成的归档自检失败：%d 个条目的位置超出文件范围（如 %s），"
+                "已放弃写入，原文件保持不变"
+                % (len(bad), bad[0].name))
+        # 抽查最小的几个条目，确认数据能真的解出来
+        for e in sorted(fresh.entries, key=lambda x: x.zsize)[:5]:
+            fresh.read_by_name(e.name)

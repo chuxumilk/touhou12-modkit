@@ -13,6 +13,7 @@ const S = {
   pending: null,
   lastComment: "",
   pendingCount: 0,
+  settings: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -79,13 +80,30 @@ $$("#tabs button").forEach((btn) => {
 });
 
 /* ---------------- 初始化 ---------------- */
+async function initSettings() {
+  try {
+    S.settings = await api("/api/config");
+  } catch (e) {
+    S.settings = null;
+  }
+}
+
 async function boot() {
   const st = await api("/api/state");
   $("#game-dir").textContent = st.game_dir || "";
   if (!st.games || st.games.length === 0) {
-    openSettings(st.game_dir || "", true);
+    // 没配好目录：顶部按钮高亮提示，但不再强弹对话框挡住其它内容
+    $("#btn-settings").classList.add("attention");
+    toast("还没有设置游戏目录，点右上角「⚙ 设置目录」选一份 TH12", true);
+    await initSettings();
     return;
   }
+  if (st.bgm_error) {
+    // 音乐数据坏了不影响贴图/对话，只提醒一下
+    toast("音乐数据读取失败：" + String(st.bgm_error).split("\n")[0]
+          + "（贴图 / 对话仍可正常修改）", true);
+  }
+  $("#btn-settings").classList.remove("attention");
   const sel = $("#game-select");
   sel.innerHTML = "";
   st.games.forEach((g) => {
@@ -117,58 +135,192 @@ async function boot() {
 }
 
 /* ---------------- 设置游戏目录 / 启动游戏 ---------------- */
-function openSettings(currentDir, isFirst) {
+function shortPath(p) {
+  if (!p) return "(未设置)";
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 3) return p;
+  return parts[0] + "\\…\\" + parts.slice(-2).join("\\");
+}
+
+function setStatus(text, cls) {
+  const el = $("#settings-status");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "status" + (cls ? " " + cls : "");
+}
+
+async function openSettings() {
   const modal = $("#settings-modal");
-  $("#settings-path").value = currentDir || "";
-  modal.dataset.first = isFirst ? "1" : "";
   modal.classList.remove("hidden");
-  loadCandidates();
-}
-
-function closeSettings() {
-  if ($("#settings-modal").dataset.first === "1") return;   // 首次必须设置
-  $("#settings-modal").classList.add("hidden");
-}
-
-async function loadCandidates() {
+  $("#settings-live").textContent = "";
+  $("#settings-live").className = "live";
   try {
-    const cfg = await api("/api/config");
-    const box = $("#settings-candidates");
-    box.innerHTML = "";
-    (cfg.candidates || []).forEach((p) => {
-      const div = document.createElement("div");
-      div.className = "cand";
-      div.textContent = p;
-      div.onclick = () => { $("#settings-path").value = p; };
-      box.appendChild(div);
-    });
-  } catch (e) { /* 忽略 */ }
+    S.settings = await api("/api/config");
+  } catch (e) { /* 用旧数据 */ }
+  showCurrentDir();
+  const cur = (S.settings && S.settings.game_dir) || "";
+  $("#settings-path").value = cur;
+  renderCandidates();
+  // 当前目录本身是好的就不用提醒，否则立刻给出可操作提示
+  if (!(S.settings && S.settings.games && S.settings.games.length)) {
+    validatePath(cur);
+  }
 }
 
-$("#btn-settings").onclick = () => openSettings($("#game-dir").textContent);
-$("#settings-cancel").onclick = closeSettings;
-$("#settings-modal").onclick = closeSettings;
+function showCurrentDir() {
+  const cfg = S.settings || {};
+  const games = cfg.games || [];
+  if (games.length) {
+    setStatus("当前：已连接 " + games.map((g) => g.label).join(" / ")
+              + "\n" + (cfg.game_dir || ""), "ok");
+  } else if (cfg.dir_exists) {
+    setStatus("当前目录里没有 th12.dat / th12c.dat：\n" + (cfg.game_dir || "")
+              + "\n请在下面选一个游戏目录，或点「重新扫描」。", "err");
+  } else {
+    setStatus("尚未设置游戏目录（下面扫描到的目录可以直接点选）", "err");
+  }
+}
+
+function renderCandidates() {
+  const box = $("#settings-candidates");
+  if (!box) return;
+  const cfg = S.settings || {};
+  const items = (cfg.candidates || []).filter((c) => c && c.path);
+  box.innerHTML = "";
+  if (!items.length) {
+    const d = document.createElement("div");
+    d.className = "cand-empty";
+    d.textContent = "没扫描到游戏目录。点「重新扫描」，或用「浏览…」手动选文件夹；"
+      + "也可以直接在输入框粘贴路径。";
+    box.appendChild(d);
+    return;
+  }
+  items.forEach((c) => {
+    const div = document.createElement("div");
+    div.className = "cand";
+    const p = document.createElement("span");
+    p.className = "cand-path";
+    p.textContent = c.path;
+    const tag = document.createElement("span");
+    tag.className = "cand-tag";
+    tag.textContent = (c.games || [])
+      .map((k) => (k === "jp" ? "日文" : "汉化")).join("+");
+    div.appendChild(p);
+    div.appendChild(tag);
+    div.onclick = () => {
+      $("#settings-path").value = c.path;
+      validatePath(c.path);
+    };
+    box.appendChild(div);
+  });
+}
+
+function showLive(text, cls) {
+  const el = $("#settings-live");
+  if (!el) return;
+  el.textContent = text || "";
+  el.className = "live" + (cls ? " " + cls : "");
+}
+
+let validateTimer = null;
+async function validatePath(path) {
+  const p = (path || "").trim();
+  if (!p) {
+    showLive("", "");
+    showCurrentDir();
+    return;
+  }
+  showLive("检查中…", "");
+  try {
+    const r = await api("/api/check?path=" + encodeURIComponent(p));
+    const problems = r.problems || [];
+    if (problems.length) {
+      // 目录能用，但数据有损坏（例如归档被写坏、thbgm 对不上）
+      showLive("⚠ " + problems[0].split("\n")[0], "warn");
+    } else if (r.ok) {
+      showLive("✓ 可用（" + (r.games || []).map(
+        (k) => (k === "jp" ? "日文版" : "汉化版")).join(" / ") + "）", "ok");
+    } else if (r.suggest) {
+      showLive("⚠ 选到上一级了，游戏在：" + r.suggest
+               + "（点「应用」会自动用它）", "warn");
+    } else {
+      showLive("✗ " + (r.message || "这个目录不能用"), "err");
+    }
+  } catch (e) {
+    showLive("✗ 检查失败：" + e.message, "err");
+  }
+}
+
+function scheduleValidate() {
+  clearTimeout(validateTimer);
+  validateTimer = setTimeout(() => validatePath($("#settings-path").value),
+                             350);
+}
+
+$("#btn-settings").onclick = () => openSettings();
+$("#settings-cancel").onclick = () => $("#settings-modal").classList.add("hidden");
+$("#settings-modal").onclick = () => $("#settings-modal").classList.add("hidden");
+$("#settings-path").oninput = scheduleValidate;
+
+$("#settings-rescan").onclick = async () => {
+  const btn = $("#settings-rescan");
+  btn.disabled = true;
+  btn.textContent = "扫描中…";
+  try {
+    const r = await api("/api/rescan");
+    S.settings = await api("/api/config");
+    renderCandidates();
+    showCurrentDir();
+    toast("扫描完成，找到 " + (r.count || 0) + " 个游戏目录");
+  } catch (ex) {
+    toast("扫描失败: " + ex.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "重新扫描";
+  }
+};
 
 $("#settings-browse").onclick = async () => {
   toast("请在弹窗中选择游戏文件夹…");
+  const cur = $("#settings-path").value.trim();
   try {
-    const res = await api("/api/pick-dir", { method: "POST" });
-    if (res.path) $("#settings-path").value = res.path;
+    const res = await api("/api/pick-dir?path=" + encodeURIComponent(cur),
+                          { method: "POST" });
+    if (res && res.path) {
+      $("#settings-path").value = res.path;
+      validatePath(res.path);
+      toast("已选择：" + res.path);
+    } else if (res && res.fallback) {
+      $("#settings-path").value = res.fallback;
+      validatePath(res.fallback);
+      toast((res.error || "没能打开系统对话框") + "，已保留你填的路径", true);
+    } else {
+      toast((res && res.error) || "没有选择文件夹（可以直接粘贴路径）", true);
+    }
   } catch (ex) {
-    toast("打开选择框失败: " + ex.message, true);
+    toast("打开选择框失败: " + ex.message + "（可以直接粘贴路径）", true);
   }
 };
 
 $("#settings-apply").onclick = async () => {
   const path = $("#settings-path").value.trim();
-  if (!path) { toast("请填写游戏目录", true); return; }
+  if (!path) { showLive("✗ 请先填写或选择一个游戏目录", "err"); return; }
+  const btn = $("#settings-apply");
+  btn.disabled = true;
   try {
-    await api("/api/config", {
+    const r = await api("/api/config", {
       method: "POST",
       body: JSON.stringify({ game_dir: path }),
     });
-    toast("游戏目录已切换");
-    $("#settings-modal").dataset.first = "";
+    if (r.used_parent) {
+      $("#settings-path").value = r.game_dir || path;
+      toast(r.message || ("已自动改用：" + (r.game_dir || "")), true);
+    } else {
+      toast("游戏目录已切换");
+    }
+    if (r.config_warning) toast(r.config_warning, true);
+    // 目录能用但数据有损坏（例如归档被写坏）→ 直接说清楚，别等用户踩坑
+    if (r.warning) toast("注意：" + r.warning, true);
     $("#settings-modal").classList.add("hidden");
     S.anmName = null; S.msgName = null; S.textures = [];
     $("#texture-grid").innerHTML = "";
@@ -177,7 +329,12 @@ $("#settings-apply").onclick = async () => {
     $("#msg-list").innerHTML = "";
     await boot();
   } catch (ex) {
-    toast("设置失败: " + ex.message, true);
+    // 报错留在弹窗里，不会一闪而过；顺便再检查一次给出可操作提示
+    showLive("✗ " + ex.message, "err");
+    toast("设置失败：" + ex.message.split("\n")[0], true);
+    validatePath(path);
+  } finally {
+    btn.disabled = false;
   }
 };
 
