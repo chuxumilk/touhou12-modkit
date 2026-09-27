@@ -2,9 +2,13 @@
 """用 ASCII 通配符提取，绕开非 ASCII 路径的命令行编码问题。"""
 import subprocess, os, sys, json
 
-RAR = r"C:\Program Files\WinRAR\UnRAR.exe"
-RARFILE = r"D:\010-Important-Work\DSH相关\东方魔改\[th12]+东方星莲船+(汉化版+日文版).rar"
-DEST = r"D:\th12"
+# 路径跟着仓库走（脚本在 _recon/ 下）；也可用环境变量指定
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RAR = os.environ.get("UNRAR") or r"C:\Program Files\WinRAR\UnRAR.exe"
+RARFILE = os.environ.get("TH12_RAR") or os.path.join(
+    WS, "[th12]+东方星莲船+(汉化版+日文版).rar")
+# 解包目标默认放在 _recon/src/（已在 .gitignore 里，不会入库）
+DEST = os.environ.get("TH12_EXTRACT_DIR") or os.path.join(WS, "_recon", "src")
 
 jobs = [
     ("dat",   r"*th12.dat"),

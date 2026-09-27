@@ -2,8 +2,12 @@
 """自证 TH12 归档结构：手工实现 th_crypt 解密头部，验证 THA1 魔数。"""
 import struct, os
 
-PATH = r"D:\th12\dat\[th12] 东方星莲船 (汉化版+日文版)\th12.dat"
-OUT = r"D:\010-Important-Work\DSH相关\东方魔改\_recon\tha1_proof.txt"
+# 所有路径都跟着仓库走（脚本在 _recon/ 下），不写死本机路径。
+# 待分析的 th12.dat：默认取仓库的 game/ 目录；也可用 TH12_DAT 指定。
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PATH = os.environ.get("TH12_DAT") or os.path.join(
+    WS, "game", "[th12] 东方星莲船 (汉化版+日文版)", "th12.dat")
+OUT = os.path.join(WS, "_recon", "tha1_proof.txt")
 L = []
 def w(s=""):
     L.append(str(s))

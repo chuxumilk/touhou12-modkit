@@ -2,8 +2,11 @@
 """th12.exe 逆向侦察：PE 结构 + 关键立即数搜索 + 代码段 dump 准备。"""
 import struct, re, os
 
-EXE = r"D:\th12\exe\[th12] 东方星莲船 (汉化版+日文版)\th12.exe"
-OUT = r"D:\010-Important-Work\DSH相关\东方魔改\_recon\exe_probe.txt"
+# 路径跟着仓库走（脚本在 _recon/ 下）；也可用 TH12_EXE 指定待分析文件
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EXE = os.environ.get("TH12_EXE") or os.path.join(
+    WS, "game", "[th12] 东方星莲船 (汉化版+日文版)", "th12.exe")
+OUT = os.path.join(WS, "_recon", "exe_probe.txt")
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 
 exe = open(EXE, "rb").read()

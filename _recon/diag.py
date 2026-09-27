@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """把 unrar 的输出以多种编码解码后写入 UTF-8 文件，并检查真实路径是否存在。"""
-import subprocess, os, io
+import subprocess, os, io, sys
 
-RAR = r"C:\Program Files\WinRAR\UnRAR.exe"
-RARFILE = r"D:\010-Important-Work\DSH相关\东方魔改\[th12]+东方星莲船+(汉化版+日文版).rar"
-OUT = r"D:\010-Important-Work\DSH相关\东方魔改\_recon\list.txt"
+# 路径跟着仓库走（脚本在 _recon/ 下）；也可用命令行参数/环境变量指定
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RAR = os.environ.get("UNRAR") or r"C:\Program Files\WinRAR\UnRAR.exe"
+RARFILE = (sys.argv[1] if len(sys.argv) > 1 else
+           os.environ.get("TH12_RAR") or
+           os.path.join(WS, "[th12]+东方星莲船+(汉化版+日文版).rar"))
+OUT = os.path.join(WS, "_recon", "list.txt")
 
 p = subprocess.run([RAR, "lb", "--", RARFILE], capture_output=True)
 raw = p.stdout

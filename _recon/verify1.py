@@ -2,15 +2,20 @@
 """对照验证：我的 thtk 包 vs 官方 thdat 对同一个 th12.dat 的结果。"""
 import os, sys, subprocess, hashlib, io
 
-WS = r"D:\010-Important-Work\DSH相关\东方魔改"
+# 仓库根目录（脚本在 _recon/ 下）：跟着仓库走，不写死本机路径
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, WS)
 
 from thtk import archive, crypto, lzss
 
-GAME = os.path.join(WS, "game", "[th12] 东方星莲船 (汉化版+日文版)")
+# 游戏目录：默认 game/[th12] …；可用环境变量 TH12_GAME_DIR 指定别的
+GAME = os.environ.get("TH12_GAME_DIR") or os.path.join(
+    WS, "game", "[th12] 东方星莲船 (汉化版+日文版)")
 DAT = os.path.join(GAME, "th12.dat")
 DAT_CN = os.path.join(GAME, "th12c.dat")
-THDAT = r"C:\thtk\build-portable\thdat\thdat.exe"
+# 官方 thdat.exe：默认 tools/thdat/thdat.exe；可用环境变量 THDAT 指定
+THDAT = os.environ.get("THDAT") or os.path.join(
+    WS, "tools", "thdat", "thdat.exe")
 OUT = os.path.join(WS, "_recon", "verify1.txt")
 
 L = []

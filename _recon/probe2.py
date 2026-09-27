@@ -2,8 +2,11 @@
 """th12.dat 结构多假设探测：明文名扫描 / PBGZ解密测试 / 熵与分布 / th06容器测试。"""
 import struct, os, re, math, collections
 
-PATH = r"D:\th12\dat\[th12] 东方星莲船 (汉化版+日文版)\th12.dat"
-OUT = r"D:\010-Important-Work\DSH相关\东方魔改\_recon\dat_probe2.txt"
+# 路径跟着仓库走（脚本在 _recon/ 下）；也可用 TH12_DAT 指定待分析文件
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PATH = os.environ.get("TH12_DAT") or os.path.join(
+    WS, "game", "[th12] 东方星莲船 (汉化版+日文版)", "th12.dat")
+OUT = os.path.join(WS, "_recon", "dat_probe2.txt")
 
 data = open(PATH, "rb").read()
 L = []

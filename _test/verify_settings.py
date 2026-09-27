@@ -19,13 +19,31 @@ import urllib.request
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8799
 BASE = "http://127.0.0.1:%d" % PORT
+def _pick_dir(candidates, env="TH12_GAME_DIR"):
+    """挑一个存在的游戏目录：环境变量 > 候选列表。"""
+    envv = os.environ.get(env)
+    if envv and os.path.isdir(envv):
+        return envv
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    raise SystemExit(
+        "找不到可用的游戏目录。请用环境变量指定，例如：\n"
+        "  set %s=D:\\Games\\th12\n"
+        "（目录里要有 th12.dat 或 th12c.dat）" % env)
+
+
 WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG = os.path.join(WS, "tools", "modtool", "config.json")
-
-MOD = r"D:\04-游戏和娱乐\东方Project\东方魔改 安东星莲船"
-MAIN = MOD + r"\game\[th12] 东方星莲船 (汉化版+日文版)"
-TEST = MOD + r"\game\测试\[th12] 东方星莲船 (汉化版+日文版)"
-PARENT = MOD + r"\game"
+MAIN = _pick_dir([
+    os.path.join(WS, "game", "[th12] 东方星莲船 (汉化版+日文版)"),
+    os.path.join(WS, "测试", "[th12] 东方星莲船 (汉化版+日文版)"),
+])
+MOD = os.path.dirname(MAIN)          # 装着游戏的那一层（测「选到上一级」）
+PARENT = MOD
+# 另一份副本（用于测切换）；没有就退回 MAIN
+_test2 = os.path.join(WS, "测试", "[th12] 东方星莲船 (汉化版+日文版)")
+TEST = _test2 if os.path.isdir(_test2) else MAIN
 ORIG = MOD
 
 PASS, FAIL = [], []
@@ -69,12 +87,21 @@ check("扫描到候选目录（以前恒为 0）", len(cfg.get("candidates") or 
       "候选 %d 个" % len(cfg.get("candidates") or []))
 cands = [os.path.normcase(os.path.normpath(c["path"]))
          for c in (cfg.get("candidates") or [])]
-check("候选里包含 mod 主目录",
+check("候选里包含游戏目录本身",
       os.path.normcase(os.path.normpath(MAIN)) in cands)
-_deep_code, deep = jcall("GET", "/api/rescan")
-deep_paths = [os.path.normcase(os.path.normpath(c["path"]))
-              for c in (deep.get("candidates") or [])]
-check("重新扫描能找到「测试」副本（深处）",
+
+# 深度扫描（「重新扫描」）找到的东西取决于后台预热有没有跑完，
+# 所以这里轮询等待：最多 40 秒，直到候选里出现 MAIN
+deep_paths = []
+for _ in range(20):
+    _deep_code, deep = jcall("GET", "/api/rescan")
+    deep_paths = [os.path.normcase(os.path.normpath(c["path"]))
+                  for c in (deep.get("candidates") or [])]
+    if os.path.normcase(os.path.normpath(MAIN)) in deep_paths:
+        break
+    time.sleep(2)
+check("重新扫描能找到游戏目录（深度扫描）",
+      os.path.normcase(os.path.normpath(MAIN)) in deep_paths or
       os.path.normcase(os.path.normpath(TEST)) in deep_paths,
       "深度扫描 %d 个" % len(deep_paths))
 
@@ -112,7 +139,7 @@ check("生效目录 = 测试副本", (r.get("game_dir") or "").lower() == TEST.l
 check("识别出版本", sorted([g["key"] for g in r.get("games") or []]) == ["cn", "jp"])
 
 print("\n⑤ 设置目录：无效路径要给清楚的理由")
-code, r = jcall("POST", "/api/config", {"game_dir": MOD + r"\不存在"})
+code, r = jcall("POST", "/api/config", {"game_dir": MOD + r"\不存在的目录"})
 check("HTTP 400", code == 400, "HTTP %s" % code)
 check("提示含「目录不存在」", "不存在" in r.get("error", ""), r.get("error", "")[:50])
 code, r = jcall("POST", "/api/config", {"game_dir": ""})

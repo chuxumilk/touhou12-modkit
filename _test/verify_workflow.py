@@ -23,8 +23,25 @@ import zipfile
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8799
 BASE = "http://127.0.0.1:%d" % PORT
 
-GOOD = (r"D:\04-游戏和娱乐\东方Project\东方魔改 安东星莲船"
-        r"\game\[th12] 东方星莲船 (汉化版+日文版)")
+
+def find_game_dir():
+    """找一份可用的游戏目录：环境变量 > 仓库内的常见位置。"""
+    ws = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    envv = os.environ.get("TH12_GAME_DIR")
+    if envv and os.path.isdir(envv):
+        return envv
+    for c in (os.path.join(ws, "game", "[th12] 东方星莲船 (汉化版+日文版)"),
+              os.path.join(ws, "测试", "[th12] 东方星莲船 (汉化版+日文版)")):
+        if os.path.isdir(c):
+            return c
+    return None
+
+
+GOOD = find_game_dir()
+if not GOOD:
+    raise SystemExit(
+        "找不到游戏目录。请设置环境变量，例如：\n"
+        "  set TH12_GAME_DIR=D:\\Games\\th12")
 
 PASS, FAIL = [], []
 

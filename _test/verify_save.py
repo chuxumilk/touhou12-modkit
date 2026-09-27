@@ -59,6 +59,7 @@ def md5(p):
 
 if not GAME or not os.path.isdir(GAME):
     print("用法: python _test/verify_save.py <port> <游戏目录>")
+    print("（只会改 musiccmt.txt，并在结束时还原；不会碰贴图/音乐数据）")
     sys.exit(2)
 
 DAT_JP = os.path.join(GAME, "th12.dat")
