@@ -20,6 +20,10 @@ HASH_SIZE = 0x10000
 HASH_NULL = 0
 
 
+class LzssError(Exception):
+    """LZSS 数据不完整或不符合预期长度（归档可能已损坏）。"""
+
+
 # --------------------------------------------------------------------------
 # 位流
 # --------------------------------------------------------------------------
@@ -86,35 +90,50 @@ class BitWriter(object):
 # 解压
 # --------------------------------------------------------------------------
 def unlzss(data, output_size):
-    """把 ``data`` 解压为恰好 ``output_size`` 字节。
+    """把 ``data`` 解压为**恰好** ``output_size`` 字节。
 
-    对应 thtk 的 ``th_unlzss``。偏移为 0 即遇到结束标记，提前返回。
+    对应 thtk 的 ``th_unlzss``。偏移为 0 即遇到结束标记，提前结束。
+
+    与 thtk 的差别：这里会**校验最终长度**。遇到结束标记或数据提前读完时，
+    ThBitReader 会按 0 继续喂数据（这是对齐 thtk 的刻意行为），
+    若不再校验，损坏/截断的归档会被静默解出短数据、当成正常内容导出，
+    错误就顺着下游扩散了。
     """
     dict_ = bytearray(LZSS_DICTSIZE)
     dict_head = 1
     br = BitReader(data)
-    out = bytearray()
+    out = bytearray(output_size)      # 预分配，避免反复扩容
     written = 0
 
     while written < output_size:
         if br.read(1):
             c = br.read(8)
-            out.append(c)
+            out[written] = c
             written += 1
             dict_[dict_head] = c
             dict_head = (dict_head + 1) & LZSS_DICTSIZE_MASK
         else:
             match_offset = br.read(13)
             if not match_offset:
-                break
+                break                     # 结束标记
             match_len = br.read(4) + LZSS_MIN_MATCH
+            if written + match_len > output_size:
+                raise LzssError(
+                    "LZSS 数据异常：匹配长度超出目标大小"
+                    "（已写出 %d，还要写 %d，目标 %d）"
+                    % (written, match_len, output_size))
             for i in range(match_len):
                 c = dict_[(match_offset + i) & LZSS_DICTSIZE_MASK]
-                out.append(c)
+                out[written] = c
                 written += 1
                 dict_[dict_head] = c
                 dict_head = (dict_head + 1) & LZSS_DICTSIZE_MASK
 
+    if written != output_size:
+        raise LzssError(
+            "LZSS 数据不完整：期望 %d 字节，只解出 %d 字节"
+            "（结束标记提前出现或数据被截断，归档可能已损坏）"
+            % (output_size, written))
     return bytes(out)
 
 
