@@ -357,16 +357,75 @@ def scan_for_games(root, depth=2, budget=None, priority=False):
     return found
 
 
+def _reg_recent_dirs():
+    """从注册表里读游戏最近用过的路径（ZUN 的游戏会存在自己名字的键下）。
+
+    用户跑过一次游戏后，这里就能直接拿到游戏目录，比全盘扫描快得多。
+    """
+    out = []
+    try:
+        import winreg
+    except ImportError:
+        return out
+    keys = []
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for sub in ("Software\\Microsoft\\Windows\\CurrentVersion\\App Paths",
+                    "Software\\ZUN", "Software\\WOW6432Node\\ZUN"):
+            keys.append((hive, sub))
+    for hive, sub in keys:
+        try:
+            with winreg.OpenKey(hive, sub) as k:
+                n = winreg.QueryInfoKey(k)[0]
+                for i in range(n):
+                    try:
+                        name = winreg.EnumKey(k, i)
+                    except OSError:
+                        continue
+                    if "th12" not in name.lower() and "touhou" not in name.lower():
+                        continue
+                    try:
+                        with winreg.OpenKey(k, name) as k2:
+                            m = winreg.QueryInfoKey(k2)[1]
+                            for j in range(m):
+                                vname, vdata, _ = winreg.EnumValue(k2, j)
+                                if not isinstance(vdata, str):
+                                    continue
+                                if "th12" not in vdata.lower():
+                                    continue
+                                d = vdata if os.path.isdir(vdata) \
+                                    else os.path.dirname(vdata)
+                                if d and os.path.isdir(d):
+                                    out.append(d)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return out
+
+
+def _path_dirs():
+    """PATH 里出现 th12 / th12c 的话，取它所在目录。"""
+    import shutil as _shutil
+    out = []
+    for exe in ("th12.exe", "th12c.exe"):
+        p = _shutil.which(exe)
+        if p:
+            out.append(os.path.dirname(p))
+    return out
+
+
 def _scan_roots(include_drives=True):
-    """生成扫描起点列表（常见位置 + 用过的目录 + 盘符根目录）。"""
+    """生成扫描起点列表（常见位置 + 用过的目录 + 注册表 + PATH + 盘符根目录）。"""
     roots = [
         os.path.join(EXE_DIR, "game"),
         EXE_DIR,
         os.getcwd(),
         os.path.dirname(EXE_DIR),
         os.path.dirname(os.path.dirname(EXE_DIR)),
+        os.path.dirname(os.path.dirname(os.path.dirname(EXE_DIR))),
     ]
     cfg = load_config()
+    # 用过的目录：优先扫它的上一级，这样「游戏就在旁边」的情况一次就命中
     for key in ("game_dir", "last_dir"):
         p = cfg.get(key)
         if p and os.path.isdir(p):
@@ -377,6 +436,9 @@ def _scan_roots(include_drives=True):
         for p in cfg.get(key) or []:
             if os.path.isdir(p):
                 roots.append(p)
+                roots.append(os.path.dirname(p))
+    roots.extend(_reg_recent_dirs())
+    roots.extend(_path_dirs())
     if include_drives:
         for drive in ("D:", "E:", "F:", "C:"):
             if os.path.isdir(drive + "\\"):
@@ -405,7 +467,7 @@ def find_candidates(deep=False, force=False):
             and (not deep or _CAND_CACHE["deep"])):
         return _CAND_CACHE["items"]
 
-    budget_s = 25.0 if deep else 2.5
+    budget_s = 30.0 if deep else 6.0
     deadline = time.time() + budget_s
     out = []
     seen = set()
@@ -677,6 +739,66 @@ def _atomic_copy(src, dst):
     shutil.copyfile(src, tmp)
     os.replace(tmp, dst)
     return dst
+
+
+def _durable_copy(src, dst):
+    """原子 + 落盘（写临时文件 → fsync → 替换）。
+
+    比 :func:`_atomic_copy` 多一次 fsync：**还原游戏文件**时用它。
+    否则断电/崩溃可能留下一个内容还没真正落盘的文件，
+    而用户以为「已经还原成功了」。
+    """
+    tmp = dst + ".tmp"
+    with open(src, "rb") as fi, open(tmp, "wb") as fo:
+        shutil.copyfileobj(fi, fo, 1024 * 1024)
+        fo.flush()
+        os.fsync(fo.fileno())
+    os.replace(tmp, dst)
+    return dst
+
+
+def _backup_problem(path, kind="archive"):
+    """检查一个备份文件能不能安全还原。
+
+    还原是「回到安全状态」的最后一道手段，如果备份本身是坏的，
+    写回去只会把游戏也弄坏 —— 所以宁可拒绝，也不动手。
+    返回问题描述字符串；返回 ``None`` 表示没问题。
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError as ex:
+        return "读不到备份文件：%s" % ex
+    if size <= 0:
+        return "备份文件是空的（0 字节）"
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError as ex:
+        return "读不到备份文件：%s" % ex
+
+    if kind == "bgm":
+        if head[:4] != b"ZWAV":
+            return ("备份不是有效的 thbgm.dat（文件头应为 ZWAV，"
+                    "实际是 %r）" % head[:4])
+        if size <= 16:
+            return "备份只有文件头、没有音频数据（%d 字节）" % size
+        return None
+
+    try:
+        ar = archive.Archive.from_file(path)
+    except Exception as ex:
+        return "备份的归档结构已损坏：%s" % ex
+    bad = [e for e in ar.entries if e.offset < 0 or e.offset >= size]
+    if bad:
+        return ("备份里有 %d 个条目的位置超出文件范围（如 %s），"
+                "备份本身不完整" % (len(bad), bad[0].name))
+    # 抽查最小的几个条目，确认数据真的能解出来
+    for e in sorted(ar.entries, key=lambda x: x.zsize)[:5]:
+        try:
+            ar.read_by_name(e.name)
+        except Exception as ex:
+            return "备份里的 %s 读不出来：%s" % (e.name, ex)
+    return None
 
 
 def human_size(n):
@@ -2265,7 +2387,13 @@ def list_backups():
 
 
 def restore_backup(which):
-    """把备份写回游戏。还原前会先把当前文件另存为 .modtool.prev。"""
+    """把备份写回游戏。还原前会先把当前文件另存为 .modtool.prev。
+
+    两道防线（缺一不可）：
+    1. **先体检备份**：备份若是空的/截断的/结构坏了就拒绝还原。
+       还原是「回到安全状态」的最后手段，写回一个坏备份等于把游戏也弄坏。
+    2. **原子 + fsync 写入**：写临时文件、落盘、再替换，不会就地写坏目标文件。
+    """
     mapping = {
         "jp": STATE.archive_path("jp"),
         "cn": STATE.archive_path("cn"),
@@ -2274,18 +2402,32 @@ def restore_backup(which):
     if which not in mapping:
         raise ApiError("未知备份: %s" % which)
     target = mapping[which]
+    kind = "bgm" if which == "bgm" else "archive"
     bak = target + BACKUP_SUFFIX
     if not os.path.exists(bak):
         raise ApiError("备份不存在（%s 还没有生成过备份）"
                        % os.path.basename(target), 404)
+
+    problem = _backup_problem(bak, kind)
+    if problem:
+        raise ApiError(
+            "备份有问题，已取消还原（游戏文件没有被改动）：\n%s\n"
+            "备份文件：%s\n"
+            "可以试试还原别的备份，或手动把 %s 改为 .bak 后缀。"
+            % (problem, os.path.basename(bak), os.path.basename(bak)))
+
+    ensure_game_closed()
     with STATE.lock:
         if os.path.exists(target):
             # 还原前保留当前状态，避免手滑丢失改动
             try:
-                _atomic_copy(target, target + ".modtool.prev")
-            except OSError:
-                pass
-        _atomic_copy(bak, target)
+                _durable_copy(target, target + ".modtool.prev")
+            except OSError as ex:
+                raise ApiError("无法保存当前文件为 .modtool.prev，已取消还原：%s" % ex)
+        try:
+            _durable_copy(bak, target)
+        except OSError as ex:
+            raise ApiError("写入失败：%s" % ex)
         STATE.invalidate()
     log("还原备份", os.path.basename(bak),
         "-> %s（原文件已存为 .modtool.prev）" % os.path.basename(target))
