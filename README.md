@@ -51,7 +51,7 @@ Python 3.7+ · Windows · [CC0 1.0 公共领域](LICENSE)
 │   ├─ web/                 #   前端（原生 HTML / CSS / JS）
 │   ├─ installer.py         #   安装器（PyInstaller 打成单文件 Setup.exe）
 │   ├─ 打包.bat             #   一键打包（exe + 安装器）
-│   ├─ 安装说明.txt
+│   ├─ INSTALL.txt
 │   └─ README.md            #   工具的完整使用说明
 ├─ _test/                   # 「设置游戏目录」等功能的验证脚本
 ├─ _recon/                  # 格式逆向调研脚本与验证记录（可删）
@@ -61,6 +61,14 @@ Python 3.7+ · Windows · [CC0 1.0 公共领域](LICENSE)
 ---
 
 ## 快速开始
+
+### 方式零：下载免安装包（不用装 Python）
+
+到 [**Releases**](../../releases) 页下载最新的 `TH12ModTool-Portable-vX.Y.Z.zip`，
+解压后双击里面的 `TH12ModTool-Portable.exe`，浏览器会自动打开工具页面。
+Windows 首次运行可能提示"未知发布者"，选「更多信息 → 仍要运行」即可。
+
+> 只想改着玩、或者想读 / 改代码，用下面两种方式更方便。
 
 ### 方式一：直接用源码（推荐）
 
@@ -73,7 +81,7 @@ pip install pillow numpy
 然后双击 `tools\modtool\启动魔改工具.bat`
 （也可以 `python tools\modtool\server.py`），浏览器会自动打开 <http://127.0.0.1:8765/>。
 
-### 方式二：用打包好的 exe
+### 方式二：自己打包成 exe
 
 `tools\modtool\打包.bat` 会生成：
 
@@ -81,6 +89,7 @@ pip install pillow numpy
 - `dist-setup\TH12ModTool-Setup.exe` —— 单文件安装器（不需要管理员权限，自带到 `%LOCALAPPDATA%`）
 
 需要额外装 `pyinstaller`；打包产物已在 `.gitignore` 中，不会进仓库。
+发布时用 `_test\make_release.cmd` 打成 Release 附件（见下）。
 
 ### 指定游戏目录
 
@@ -174,4 +183,4 @@ pip install pillow numpy
 ## 相关文档
 
 - [`tools/modtool/README.md`](tools/modtool/README.md) —— 工具完整说明（含各文件格式的结构笔记）
-- [`tools/modtool/安装说明.txt`](tools/modtool/安装说明.txt) —— 安装器用户的使用说明
+- [`tools/modtool/INSTALL.txt`](tools/modtool/INSTALL.txt) —— 安装器用户的使用说明

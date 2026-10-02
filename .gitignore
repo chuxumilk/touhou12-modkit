@@ -43,3 +43,6 @@ _test/fakegame/
 _test/notagame/
 _test/chrome-profile*/
 _test/*.orig
+
+# ===== 发布产物（打包出来的 zip，不入库）=====
+release/

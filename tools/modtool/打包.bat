@@ -32,7 +32,7 @@ if errorlevel 1 goto fail
 
 echo.
 echo [2/4] 复制说明文件…
-copy /y "%~dp0安装说明.txt" "%DIST%\%NAME%\" >nul
+copy /y "%~dp0INSTALL.txt" "%DIST%\%NAME%\" >nul
 
 echo.
 echo [3/4] 压缩程序本体 (app.zip)…

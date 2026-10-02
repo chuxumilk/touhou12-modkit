@@ -20,7 +20,6 @@ import subprocess
 import sys
 import threading
 import time
-import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -29,7 +28,7 @@ WS = os.path.abspath(os.path.join(HERE, "..", ".."))
 if WS not in sys.path:
     sys.path.insert(0, WS)
 
-from thtk import anm, archive, bgm, crypto, msg  # noqa: E402
+from thtk import anm, archive, bgm, msg  # noqa: E402
 
 # ----------------------------------------------------------------------
 # 路径：源码运行 / PyInstaller 打包后运行 两种情况
@@ -1304,26 +1303,61 @@ def replace_texture(key, anm_name, index, png_data):
             "format": new_texture.format_name}
 
 
+def _pending_pcm_len(index):
+    """取暂存的替换 PCM 长度；没有暂存则返回 None。
+
+    `/api/bgm` 必须用它来报「替换后的真实长度」。否则替换完一首更短的曲子后，
+    界面显示的仍是原曲时长，用户按旧时长设循环点，保存时又按新长度校验，
+    很容易设成非法值被归零 —— 表现就是「换了 BGM 后循环点改不了」。
+    """
+    path = STATE.bgm_pending.get(index)
+    if not path:
+        return None
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    return size if size > 0 else None
+
+
 def list_bgm():
     fmt = STATE.bgm_fmt()
     tracks = []
     for t in fmt.tracks:
+        pend_len = _pending_pcm_len(t.index)
+        # 有暂存替换时，长度/时长都按新音频算（这才是保存后会生效的值）
+        eff_end = pend_len if pend_len else t.end
+        eff_bytes = t.avg_bytes or bgm.BYTES_PER_SEC
+        loop = STATE.bgm_loop.get(t.index, t.loop)
         tracks.append({
             "index": t.index,
             "name": t.name,
-            "duration": t.duration,
+            "duration": eff_end / float(eff_bytes) if eff_bytes else 0.0,
             "loop": t.loop,
-            "loop_seconds": t.loop_seconds,
-            "size": t.end,
+            "loop_seconds": t.loop / float(eff_bytes) if eff_bytes else 0.0,
+            "size": eff_end,
+            "orig_size": t.end,
+            "pending_size": pend_len,
             "pending": t.index in STATE.bgm_replaced,
             "pending_loop": STATE.bgm_loop.get(t.index),
+            "pending_loop_seconds": (loop / float(eff_bytes)) if eff_bytes
+                                    else 0.0,
+            # 循环点上限：不能超过保存后的轨道长度
+            "max_loop_seconds": (eff_end / float(eff_bytes)) if eff_bytes
+                                else 0.0,
         })
     return {"tracks": tracks,
-            "pending_count": len(STATE.bgm_replaced),
+            "pending_count": len(STATE.bgm_replaced) + len(STATE.bgm_loop),
             "dat_size": os.path.getsize(BGM_DAT) if os.path.exists(BGM_DAT) else 0}
 
 
 def bgm_wav(index):
+    """导出某条曲目的 WAV。
+
+    注意：`thbgm.dat` 里存的是**裸 PCM**（没有 WAV 头），
+    暂存的替换文件也是裸 PCM。以前这条分支直接把裸 PCM 当返回值发出去，
+    于是「替换后导出 WAV」拿到的其实不是合法 WAV（缺 44 字节头）。
+    """
     fmt = STATE.bgm_fmt()
     if index < 0 or index >= len(fmt.tracks):
         raise ApiError("曲目序号不存在", 404)

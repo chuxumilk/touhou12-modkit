@@ -700,20 +700,32 @@ function renderBgm() {
   if (!S.bgm) return;
   S.bgm.tracks.forEach((t) => {
     const tr = document.createElement("tr");
+    // 有暂存替换时用它自己的循环点，否则用正式的
     const loopSec = (t.pending_loop != null ? t.pending_loop : t.loop) /
       (44100 * 4);
-    const status = t.pending
-      ? '<span class="pill warn">已暂存替换</span>'
+    // duration/size 由后端按「替换后的真实长度」给出（有暂存就用新音频），
+    // 否则用户会按原曲时长设循环点，保存时又按新长度校验而失败。
+    const replaced = t.pending_size != null;
+    const status = replaced
+      ? `<span class="pill warn">已暂存替换 · ${fmtDuration(t.duration)}</span>`
       : '<span class="pill">原始</span>';
+    const cap = t.max_loop_seconds || t.duration || 0;
     tr.innerHTML = `
       <td>${t.index}</td>
       <td>${t.name}</td>
-      <td>${fmtDuration(t.duration)}</td>
+      <td>${fmtDuration(t.duration)}${replaced
+        ? `<br><span class="muted" style="font-size:11px">原 `
+          + `${fmtDuration((t.orig_size || 0) / (44100 * 4))}</span>`
+        : ""}</td>
       <td><input type="number" min="0" step="0.1" style="width:90px"
-           value="${loopSec.toFixed(1)}" data-loop="${t.index}"> 秒</td>
+           max="${cap.toFixed(1)}"
+           value="${loopSec.toFixed(1)}" data-loop="${t.index}"> 秒
+        ${t.pending_loop != null
+          ? '<br><span class="muted" style="font-size:11px">待保存</span>'
+          : ""}</td>
       <td>${status}</td>
       <td><audio controls preload="none"
-           src="/api/bgm.wav?index=${t.index}"></audio></td>
+           src="/api/bgm.wav?index=${t.index}&t=${t.pending ? Date.now() : 0}"></audio></td>
       <td><div class="row-actions">
         <button class="mini" data-act="replace">替换</button>
         <button class="mini" data-act="loop">设置循环点</button>

@@ -54,13 +54,12 @@ class BitReader(object):
 class BitWriter(object):
     """MSB-first 位写入器，语义与 thtk 的 ``bitstream_write*`` 一致。"""
 
-    __slots__ = ("_out", "_byte", "_bits", "byte_count")
+    __slots__ = ("_out", "_byte", "_bits")
 
     def __init__(self):
         self._out = bytearray()
         self._byte = 0
         self._bits = 0
-        self.byte_count = 0
 
     def write1(self, bit):
         self._byte = ((self._byte << 1) | (bit & 1)) & 0xFF
@@ -69,7 +68,6 @@ class BitWriter(object):
             self._out.append(self._byte)
             self._bits = 0
             self._byte = 0
-            self.byte_count += 1
 
     def write(self, nbits, value):
         for i in range(nbits - 1, -1, -1):
@@ -82,7 +80,6 @@ class BitWriter(object):
             self._out.append(self._byte)
             self._bits = 0
             self._byte = 0
-            self.byte_count += 1
         return bytes(self._out)
 
 
