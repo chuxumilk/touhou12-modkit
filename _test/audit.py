@@ -92,13 +92,27 @@ print("   共 %d 处静默吞掉异常" % len(swallow))
 for i, l in swallow[:10]:
     print("      %d: %s" % (i, l))
 
-print("\n⑨ 线程安全：直接改 STATE 的容器（没走 self.lock）")
+print("\n⑨ 线程安全：直接改 STATE 的容器（没走 STATE.lock）")
+# 用缩进追踪：记录当前处于哪些 with 块的缩进层级，
+# 只有「不在 with STATE.lock: 作用域内」的赋值才算可疑。
 hits = []
+lock_indents = []          # 当前生效的 with STATE.lock 块体缩进
 for i, line in enumerate(srv.splitlines(), 1):
-    if re.search(r"STATE\.(anm_cache|texture_index|archives|pending|batch)\s*=", line):
-        prev = srv.splitlines()[i - 2] if i >= 2 else ""
-        if "self.lock" not in prev and "with STATE.lock" not in prev:
-            hits.append((i, line.strip()))
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    indent = len(line) - len(line.lstrip())
+    # 离开作用域
+    while lock_indents and indent <= lock_indents[-1] and \
+            not stripped.startswith("with "):
+        lock_indents.pop()
+    if re.match(r"with STATE\.lock\s*:", stripped):
+        lock_indents.append(indent)
+        continue
+    if re.search(r"\bSTATE\.(anm_cache|texture_index|archives|pending|batch"
+                 r"|bgm_pending|bgm_loop|bgm_replaced|fmt)\s*=", stripped):
+        if not lock_indents or indent <= lock_indents[-1]:
+            hits.append((i, stripped))
 print("   共 %d 处" % len(hits))
 for i, l in hits:
     print("      %d: %s" % (i, l))

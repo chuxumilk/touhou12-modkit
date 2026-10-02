@@ -860,8 +860,6 @@ class State(object):
         self.bgm_loop = {}        # index -> 新的循环点（字节）
         self.bgm_replaced = set()
         self.bgm_error = {}       # key -> 上次读取失败的原因
-        self.jobs = {}
-        self.job_seq = 0
         self.game_key = "jp"
         self.batch = []
         self.batch_seq = 0
@@ -942,15 +940,6 @@ class State(object):
             return None, str(ex)
 
     # -- 任务 --------------------------------------------------------
-    def new_job(self):
-        with self.lock:
-            self.job_seq += 1
-            job = {"id": self.job_seq, "state": "running",
-                   "progress": 0.0, "message": "准备中…"}
-            self.jobs[self.job_seq] = job
-            return job
-
-
 STATE = State()
 
 
@@ -982,7 +971,18 @@ def save_archive_entry(key, name, data, action="写入归档文件", detail=""):
         staged = os.path.join(STAGING_DIR, "pending_%04d.bin" % seq)
         with open(staged, "wb") as f:
             f.write(data)
-        # 同一条目只保留最后一次修改
+        # 同一条目只保留最后一次修改 —— 被顶掉的那份暂存文件必须**删掉**。
+        # 以前只从列表里剔除、文件留着，而这些文件从此没有任何引用，
+        # clear_pending() 也遍历不到，于是暂存目录越积越大
+        # （实测攒到过 24 个孤儿分片、55 MB）。
+        for old in STATE.pending:
+            if old["game"] == key and old["name"] == name:
+                old_staged = old.get("staged")
+                if old_staged and old_staged != staged:
+                    try:
+                        os.remove(old_staged)
+                    except OSError:
+                        pass
         STATE.pending = [x for x in STATE.pending
                          if not (x["game"] == key and x["name"] == name)]
         STATE.pending.append({
@@ -1046,6 +1046,38 @@ def clear_pending():
         STATE.bgm_loop = {}
         STATE.bgm_replaced = set()
     return {"ok": True}
+
+
+def clean_staging_orphans():
+    """启动时清掉暂存目录里没人引用的分片。
+
+    暂存是「这次会话还没保存的改动」，进程重启后 STATE.pending 一律为空，
+    所以磁盘上遗留的 pending_*.bin / track_*.pcm 全都是孤儿 ——
+    留着只会白占空间（实测攒到过 55 MB）。
+    返回 (删除文件数, 释放字节数)。
+    """
+    removed = 0
+    freed = 0
+    if not os.path.isdir(STAGING_DIR):
+        return removed, freed
+    try:
+        names = os.listdir(STAGING_DIR)
+    except OSError:
+        return removed, freed
+    for name in names:
+        if not (name.startswith("pending_") or name.startswith("track_")):
+            continue
+        path = os.path.join(STAGING_DIR, name)
+        try:
+            if not os.path.isfile(path):
+                continue
+            size = os.path.getsize(path)
+            os.remove(path)
+            removed += 1
+            freed += size
+        except OSError:
+            continue
+    return removed, freed
 
 
 def save_all(comment=""):
@@ -1663,39 +1695,44 @@ def check_path_info(path):
         return info
     if resolved != raw:
         info["from_file"] = True
-    info["path"] = resolved
-    info["exists"] = True
     found = check_game_dir(resolved)
-    if found:
-        info.update({"ok": True, "games": found,
-                     "message": "可用版本：%s" % " / ".join(
-                         GAMES[k]["label"] for k in found)})
-        if len(found) > 1:
-            info["message"] += "；日文版/汉化版共用 thbgm.dat"
-        if note:
-            # 例如「已根据文件定位到目录：…」，另起一行，别和上面的状态挤在一起
-            info["message"] += "\n" + note
-        info["problems"], info["notes"] = diagnose_game_dir(resolved, found)
-        if info["problems"]:
-            info["message"] += "\n⚠ " + info["problems"][0].splitlines()[0]
-        elif info["notes"]:
-            # 能用，但有需要知情的地方（例如条目长度与记录不一致）
-            info["message"] += "\n注：" + info["notes"][0].splitlines()[0]
+    if not found:
+        # 指到了「装着游戏的那一层」：自动往下找一层。
+        # 这里仍然给出 suggest，让界面能提示用户实际用的是哪个目录。
+        sub = find_game_subdir(resolved)
+        if sub:
+            games = check_game_dir(sub)
+            info.update({"suggest": sub, "games": games, "exists": True,
+                         "message": ("这个目录本身没有 th12.dat / th12c.dat，"
+                                     "但里面有一份游戏：\n%s" % sub)})
+            info["problems"], info["notes"] = diagnose_game_dir(sub, games)
+            return info
+        info["path"] = resolved
+        info["exists"] = True
+        info["message"] = ("这个目录里没有 th12.dat 或 th12c.dat。\n"
+                           "请选「里面直接放着 th12.dat / th12c.dat」"
+                           "的那个文件夹（不是它的上一级），"
+                           "或者直接选那个 .dat 文件。")
         return info
 
-    # 这里不是游戏目录：看看是不是「指到了上一级」，直接把正确路径找出来
-    sub = find_game_subdir(resolved)
-    if sub:
-        games = check_game_dir(sub)
-        info.update({"suggest": sub, "games": games})
-        info["message"] = ("这个目录本身没有 th12.dat / th12c.dat，"
-                           "但里面有一份游戏：\n%s" % sub)
-        info["problems"], info["notes"] = diagnose_game_dir(sub, games)
-        return info
-    info["message"] = ("这个目录里没有 th12.dat 或 th12c.dat。\n"
-                       "请选「里面直接放着 th12.dat / th12c.dat」"
-                       "的那个文件夹（不是它的上一级），"
-                       "或者直接选那个 .dat 文件。")
+    if resolved != raw:
+        # 输入的是文件，已定位到它所在目录
+        info["path"] = resolved
+    info["exists"] = True
+    info.update({"ok": True, "games": found,
+                 "message": "可用版本：%s" % " / ".join(
+                     GAMES[k]["label"] for k in found)})
+    if len(found) > 1:
+        info["message"] += "；日文版/汉化版共用 thbgm.dat"
+    if note:
+        # 例如「已根据文件定位到目录：…」，另起一行，别和上面的状态挤在一起
+        info["message"] += "\n" + note
+    info["problems"], info["notes"] = diagnose_game_dir(resolved, found)
+    if info["problems"]:
+        info["message"] += "\n⚠ " + info["problems"][0].splitlines()[0]
+    elif info["notes"]:
+        # 能用，但有需要知情的地方（例如条目长度与记录不一致）
+        info["message"] += "\n注：" + info["notes"][0].splitlines()[0]
     return info
 
 
@@ -2611,11 +2648,6 @@ class Handler(BaseHTTPRequestHandler):
         if route == "bgm.wav":
             data = bgm_wav(int(q.get("index", "0")))
             return self._send(200, data, "audio/wav")
-        if route == "job":
-            job = STATE.jobs.get(int(q.get("id", "0")))
-            if not job:
-                raise ApiError("任务不存在", 404)
-            return self._json(job)
         if route == "msg":
             return self._json(get_msg(q.get("game", "jp"),
                                       q.get("name", "")))
@@ -2804,12 +2836,20 @@ def main():
         set_game_dir(args.game_dir)
     elif cfg.get("game_dir"):
         saved = cfg["game_dir"]
-        if check_game_dir(saved) or find_game_subdir(saved):
-            # 目录还在（或只是指到了上一级）就用它；已失效则忽略，
-            # 回落到默认目录，避免弹窗里一直预填一个死路径
-            set_game_dir(saved)
-        else:
+        # 存下来的目录可能只是「装着游戏的那一层」，这里要**真正上浮**到
+        # 游戏目录本身。以前判断用了 find_game_subdir 放行，但 set_game_dir
+        # 拿到的还是原来那一层，结果就是「启动后显示记住了目录，
+        # 但 available_games() 为空、一个版本都没有」。
+        resolved, err, _note = resolve_game_input(saved)
+        if err or not resolved:
             print("上次的游戏目录已失效，已忽略: %s" % saved)
+        elif resolved != saved and check_game_dir(resolved):
+            set_game_dir(resolved)
+            print("上次记录的是上一层目录，已自动改用: %s" % resolved)
+        elif check_game_dir(resolved):
+            set_game_dir(resolved)
+        else:
+            print("上次的游戏目录里没有游戏数据，已忽略: %s" % saved)
     if cfg.get("last_game"):
         STATE.game_key = cfg["last_game"]
 
@@ -2822,6 +2862,11 @@ def main():
 
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     httpd.daemon_threads = True
+    # 上次会话遗留的暂存分片（没保存就退出了）已无引用，清掉免得白占空间
+    n_orphan, freed = clean_staging_orphans()
+    if n_orphan:
+        print("已清理上次遗留的暂存文件: %d 个（%s）"
+              % (n_orphan, human_size(freed)))
     # 后台预热贴图索引（首次要解压全部 .anm，之后走磁盘缓存）
     threading.Thread(target=warm_up_texture_index, daemon=True).start()
     # 后台预热候选目录扫描，这样第一次打开「设置目录」不用等
