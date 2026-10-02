@@ -62,9 +62,55 @@ function pickFile(accept) {
     const input = $("#hidden-file");
     input.value = "";
     input.accept = accept || "";
-    input.onchange = () => resolve(input.files[0] || null);
+    // 用户取消对话框时也要 resolve，否则调用方的 await 会永远挂住
+    // （表现为「点了没反应」，而且闭包一直留着）。
+    let done = false;
+    const finish = (f) => {
+      if (done) return;
+      done = true;
+      input.onchange = null;
+      window.removeEventListener("focus", onFocus);
+      resolve(f || null);
+    };
+    const onFocus = () => {
+      // 对话框关闭后窗口重新获得焦点：给 change 事件一点时间先到
+      setTimeout(() => finish(input.files && input.files[0]), 400);
+    };
+    input.onchange = () => finish(input.files[0] || null);
+    window.addEventListener("focus", onFocus, { once: true });
     input.click();
   });
+}
+
+/**
+ * 粗判文本编码：返回 "utf8-bom" | "utf16" | "gbk" | "utf8"。
+ *
+ * 为什么需要它：`File.text()` 是**硬性** UTF-8 解码。用户把导出的文档
+ * 在记事本里「另存为 ANSI」之后，GBK 字节会在浏览器里就变成 U+FFFD，
+ * 后端再怎么容错也救不回来 —— 译文会被静默毁掉。
+ */
+function sniffDocEncoding(buf) {
+  const b = new Uint8Array(buf);
+  if (b.length >= 3 && b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF) {
+    return "utf8-bom";
+  }
+  if (b.length >= 2 && ((b[0] === 0xFF && b[1] === 0xFE) ||
+                        (b[0] === 0xFE && b[1] === 0xFF))) {
+    return "utf16";
+  }
+  if (!b.length) return "utf8";
+  // 用非致命解码器试探：出现 U+FFFD 说明不是合法 UTF-8
+  const probe = new TextDecoder("utf-8", { fatal: false })
+    .decode(b.subarray(0, Math.min(b.length, 65536)));
+  if (!probe.includes("\uFFFD")) return "utf8";
+  // 再看像不像 GBK：GBK 是双字节，首字节 0x81-0xFE、次字节 0x40-0xFE
+  let pairs = 0, ascii = 0;
+  for (let i = 0; i < b.length && i < 4096; i++) {
+    if (b[i] < 0x80) { ascii++; continue; }
+    if (b[i] >= 0x81 && b[i] <= 0xFE && i + 1 < b.length &&
+        b[i + 1] >= 0x40 && b[i + 1] <= 0xFE) { pairs++; i++; }
+  }
+  return pairs > 0 && pairs * 4 > ascii ? "gbk" : "utf8";
 }
 
 /* ---------------- 标签切换 ---------------- */
@@ -125,14 +171,38 @@ async function boot() {
     $("#texture-title").textContent = "请选择左侧的贴图文件";
     $("#msg-title").textContent = "请选择左侧的对话文件";
     $("#msg-save").disabled = true;
-    await loadArchive();
-    await loadMusiccmt();
+    await refreshAll();
   };
   updatePending(st.bgm);
-  await loadPending();
-  await loadArchive();
-  await loadBgm();
-  await loadMusiccmt();
+  await refreshAll();
+}
+
+/**
+ * 刷新各个页签的数据。**每一项单独容错**：
+ * 以前是顺序 await，任意一个接口抛错都会中断后面的初始化
+ * （例如音乐数据损坏时 loadBgm 抛错 → 音乐室评论页不加载），
+ * 而且异常冒到顶层后会把具体提示覆盖成笼统的「初始化失败」。
+ */
+async function refreshAll() {
+  const jobs = [
+    ["待保存列表", loadPending],
+    ["归档列表", loadArchive],
+    ["音乐", loadBgm],
+    ["音乐室评论", loadMusiccmt],
+  ];
+  const failed = [];
+  for (const [label, fn] of jobs) {
+    try {
+      await fn();
+    } catch (ex) {
+      failed.push(`${label}(${ex.message})`);
+    }
+  }
+  if (failed.length) {
+    toast("部分内容加载失败：" + failed.join("；")
+          + "　其它页签仍可使用", true);
+  }
+  return failed;
 }
 
 /* ---------------- 设置游戏目录 / 启动游戏 ---------------- */
@@ -370,10 +440,10 @@ $("#btn-launch").onclick = async () => {
 };
 
 function updatePending(bgminfo) {
-  if (!bgminfo) return;
-  S.pendingCount = bgminfo.pending_count || 0;
-  $("#bgm-apply").disabled = S.pendingCount === 0;
-  $("#bgm-cancel").disabled = S.pendingCount === 0;
+  // 保留旧签名兼容 boot() 的调用；但按钮状态统一由 applyBgmButtons()
+  // 根据 /api/pending 决定（见那里的注释）。
+  if (bgminfo) S.bgmInfo = bgminfo;
+  applyBgmButtons();
 }
 
 /* ---------------- 归档列表 ---------------- */
@@ -685,6 +755,9 @@ async function setBgmLoop(t) {
       { method: "POST" });
     toast(`循环点已设为 ${(res.loop / 176400).toFixed(2)} 秒`);
     await loadBgm();
+    // 必须刷新待保存列表：否则按钮状态与底部待保存条都不会更新，
+    // 用户改完循环点却找不到保存入口（只能刷新页面）。
+    await loadPending();
   } catch (ex) {
     toast("设置失败: " + ex.message, true);
   }
@@ -820,7 +893,31 @@ $("#msg-import").onclick = async () => {
   const file = await pickFile(".txt,text/plain");
   if (!file) return;
   try {
-    const text = await file.text();
+    const buf = await file.arrayBuffer();
+    const kind = sniffDocEncoding(buf);
+    if (kind === "utf16") {
+      toast("这个文档像是 UTF-16（记事本「Unicode」编码），"
+            + "请另存为「UTF-8」后再导入", true);
+      return;
+    }
+    if (kind === "gbk") {
+      const ok = confirm(
+        "这个文档不是 UTF-8 编码（像是 GBK/ANSI）。\n\n"
+        + "直接导入会出现乱码，工具不会改动游戏文件。\n"
+        + "建议在编辑器里「另存为 → 编码选 UTF-8」后重新导入。\n\n"
+        + "仍要继续尝试吗？（不推荐）");
+      if (!ok) return;
+    }
+    // 注意：file.text() 是**硬性** UTF-8 解码，GBK 字节会在这里就变成
+    // U+FFFD（替换字符），后端再怎么容错也救不回来 —— 所以上面先探测。
+    const text = new TextDecoder("utf-8").decode(buf);
+    if (text.includes("\uFFFD") && kind !== "gbk") {
+      const ok = confirm(
+        "文档里有无法按 UTF-8 解码的字节（已变成 �）。\n"
+        + "多半是保存成了 GBK/ANSI。\n\n"
+        + "继续导入会把这些问题字符写进游戏，确定继续吗？（不推荐）");
+      if (!ok) return;
+    }
     const url = `/api/msg.preview?game=${S.game}` +
       `&name=${encodeURIComponent(S.msgName)}`;
     const res = await api(url, { method: "POST", body: text });
@@ -1165,10 +1262,23 @@ function stopProgressWatch() {
 }
 
 /* ---------------- 待保存 / 保存 ---------------- */
+function applyBgmButtons() {
+  // 音乐页两个按钮的可用性只看「有没有待保存项」，不看具体是哪一类。
+  // 以前读的是 /api/bgm 里的 pending_count，而那个字段只统计「替换曲目」、
+  // 不含「循环点」——只改循环点时两个按钮都是 disabled，
+  // 底部待保存条又不刷新，用户就没有任何入口能保存或放弃这次改动。
+  const items = (S.pending && S.pending.items) || [];
+  const bgmPending = items.some((i) => i.kind === "bgm");
+  $("#bgm-apply").disabled = !bgmPending;
+  $("#bgm-cancel").disabled = !bgmPending;
+}
+
 async function loadPending() {
   try {
     const data = await api("/api/pending");
     S.pending = data;
+    S.pendingCount = data.count || 0;
+    applyBgmButtons();
     const bar = $("#pending-bar");
     if (!data.count) {
       bar.classList.add("hidden");

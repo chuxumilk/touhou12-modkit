@@ -2657,7 +2657,11 @@ class Handler(BaseHTTPRequestHandler):
             text = msg_document(key, name)
             fname = urllib.parse.quote(
                 name.rsplit(".", 1)[0] + ".txt")
-            return self._send(200, text.encode("utf-8"),
+            # 带 UTF-8 BOM 导出：Windows 记事本等编辑器靠 BOM 判断编码，
+            # 没有 BOM 时「另存为 ANSI」会把译文写成 GBK，
+            # 再导入就全是乱码。后端导入用 utf-8-sig，能吃掉这个 BOM。
+            data = b"\xef\xbb\xbf" + text.encode("utf-8")
+            return self._send(200, data,
                               "text/plain; charset=utf-8",
                               {"Content-Disposition":
                                "attachment; filename*=UTF-8''%s" % fname})
