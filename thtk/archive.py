@@ -126,6 +126,11 @@ class Archive(object):
         self.path = None
         self.list_size = 0
         self.list_zsize = 0
+        #: 读出时长度不足的条目：``[(名字, 声明长度, 实得长度)]``。
+        #: 现实中的归档确实会有条目表的 size 与数据流对不上的情况
+        #: （实测某份汉化版 th12c.dat 里 179 条中有 107 条如此），
+        #: 这时尽力读出已有数据，同时把不一致记录下来供上层提示用户。
+        self.partial_entries = []
 
     # ------------------------------------------------------------------
     # 读取
@@ -236,7 +241,14 @@ class Archive(object):
         if not e.compressed:
             raise ArchiveError("条目 %s 的尺寸字段异常 (size=%d zsize=%d)"
                                % (e.name, e.size, e.zsize))
-        return lzss.unlzss(blob, e.size)
+        # allow_partial：真实归档里存在「条目表 size 与数据流不一致」的情况
+        # （实测某份汉化版 th12c.dat 有 107 条如此）。这类归档用官方
+        # thdat 也是「解出多少算多少」，所以这里同样尽力而为，
+        # 但把不一致记录下来（Archive.partial_entries），让上层能提示用户。
+        got = lzss.unlzss(blob, e.size, allow_partial=True)
+        if len(got) != e.size:
+            self.partial_entries.append((e.name, e.size, len(got)))
+        return got
 
     def read_by_name(self, name):
         i = self.index_of(name)

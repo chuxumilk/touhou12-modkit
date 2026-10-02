@@ -89,15 +89,21 @@ class BitWriter(object):
 # --------------------------------------------------------------------------
 # 解压
 # --------------------------------------------------------------------------
-def unlzss(data, output_size):
+def unlzss(data, output_size, allow_partial=False):
     """把 ``data`` 解压为**恰好** ``output_size`` 字节。
 
-    对应 thtk 的 ``th_unlzss``。偏移为 0 即遇到结束标记，提前结束。
+    对应 thtk 的 ``th_unlzss``。偏移为 0 即遇到结束标记，提前结束；
+    最后一次匹配允许越过 ``output_size``，超出部分丢弃（真实归档里有这种数据）。
 
-    与 thtk 的差别：这里会**校验最终长度**。遇到结束标记或数据提前读完时，
-    ThBitReader 会按 0 继续喂数据（这是对齐 thtk 的刻意行为），
-    若不再校验，损坏/截断的归档会被静默解出短数据、当成正常内容导出，
-    错误就顺着下游扩散了。
+    与 thtk 的差别：这里会**校验最终长度**。数据被截断、或结束标记提前出现时，
+    ThBitReader 会按 0 继续喂数据（对齐 thtk 的刻意行为），若不再校验就会
+    静默返回短数据（实测：8000 字节的流截到一半 → 返回 1577 字节），
+    损坏的归档会被当成正常内容导出、再打包，错误一路扩散。
+
+    :param allow_partial: 为真时长度不够就返回已解出的部分、不报错。
+        给「读取既有归档」用 —— 现实中确实存在条目表 size 与数据流不一致的
+        归档（实测某份汉化版 th12c.dat 里 179 条中有 107 条如此），
+        对它们应当尽力而为，而不是让整个归档读不出来。
     """
     dict_ = bytearray(LZSS_DICTSIZE)
     dict_head = 1
@@ -117,12 +123,12 @@ def unlzss(data, output_size):
             if not match_offset:
                 break                     # 结束标记
             match_len = br.read(4) + LZSS_MIN_MATCH
-            if written + match_len > output_size:
-                raise LzssError(
-                    "LZSS 数据异常：匹配长度超出目标大小"
-                    "（已写出 %d，还要写 %d，目标 %d）"
-                    % (written, match_len, output_size))
+            # 最后一次匹配**允许越过** output_size，超出部分丢弃。
+            # 真实归档里就有（例如 th12c.dat 的 th12_0100b.ver：
+            # 目标 99 字节，最后一段匹配还要再写 15 字节），不能因此报错。
             for i in range(match_len):
+                if written >= output_size:
+                    break
                 c = dict_[(match_offset + i) & LZSS_DICTSIZE_MASK]
                 out[written] = c
                 written += 1
@@ -130,6 +136,8 @@ def unlzss(data, output_size):
                 dict_head = (dict_head + 1) & LZSS_DICTSIZE_MASK
 
     if written != output_size:
+        if allow_partial:
+            return bytes(out[:written])
         raise LzssError(
             "LZSS 数据不完整：期望 %d 字节，只解出 %d 字节"
             "（结束标记提前出现或数据被截断，归档可能已损坏）"

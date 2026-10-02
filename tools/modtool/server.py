@@ -757,6 +757,17 @@ def _durable_copy(src, dst):
     return dst
 
 
+def _write_durable(path, blob):
+    """把 bytes 原子 + 落盘地写到 ``path``（写临时文件 → fsync → 替换）。"""
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(blob)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    return path
+
+
 def _backup_problem(path, kind="archive"):
     """检查一个备份文件能不能安全还原。
 
@@ -1049,43 +1060,43 @@ def save_all(comment=""):
     if not pending and not bgm_pending and not bgm_loop:
         raise ApiError("没有待保存的修改")
 
-    # ---- 1) BGM：先重建 thbgm.dat，并把新 fmt 混入归档修改 ----
+    # 本次要处理的版本列表：先快照，避免后面边改状态边遍历
+    games = STATE.available_games()
+
+    # ---- 1) BGM：重建 thbgm.dat 到临时文件（先不替换）----
+    temp_bgm = None
     fmt_bytes = None
     if bgm_pending or bgm_loop:
         fmt = STATE.bgm_fmt()
         for idx, loop in bgm_loop.items():
             fmt.tracks[idx].loop = loop
-        new_dat = BGM_DAT + ".new"
+        temp_bgm = BGM_DAT + ".new"
         total_tracks = len(fmt.tracks)
         tok = PROGRESS.start("正在重建 thbgm.dat（约 400MB）",
                              total_tracks)
         try:
             bgm.rebuild_bgm_dat(
-                BGM_DAT, new_dat, bgm_pending, fmt,
+                BGM_DAT, temp_bgm, bgm_pending, fmt,
                 progress=lambda done, total: PROGRESS.update(
                     current=done, total=total, token=tok,
                     detail=fmt.tracks[min(done, total - 1)].name
                     if total else ""))
-            PROGRESS.update(detail="正在生成备份…", token=tok)
-            ensure_backup(BGM_DAT, comment)
-            os.replace(new_dat, BGM_DAT)
-            fmt_bytes = fmt.to_bytes()
-            result["bgm"] = True
-            log("保存BGM修改", "%d 首替换 / %d 首循环点"
-                % (len(bgm_pending), len(bgm_loop)),
-                comment or human_size(os.path.getsize(BGM_DAT)))
         except Exception as ex:
             PROGRESS.done(token=tok)
             result["errors"].append("BGM: %s" % ex)
             raise
+        fmt_bytes = fmt.to_bytes()
 
-    # ---- 2) 归档：按版本分组，一次写入 ----
+    # ---- 2) 归档：把改动打包到内存 / 临时文件（也先不替换）----
     by_game = {}
     for it in pending:
         by_game.setdefault(it["game"], []).append(it)
     if fmt_bytes:
-        for key in STATE.available_games():
+        for key in games:
             by_game.setdefault(key, [])
+
+    archives = {}          # key -> {"blob":..., "tmp":..., "path":...}
+    arch_items = {}        # key -> 已成功打包的条目（用于写日志）
     for key, items in by_game.items():
         a = STATE.archive(key)
         replacements = {}
@@ -1101,6 +1112,7 @@ def save_all(comment=""):
         if fmt_bytes:
             replacements["thbgm.fmt"] = fmt_bytes
         if not replacements:
+            PROGRESS.done(token=tok)
             continue
         # 写盘前自检：ANM 结构必须合法
         bad = []
@@ -1110,30 +1122,91 @@ def save_all(comment=""):
                 if problems:
                     bad.append("%s: %s" % (name, "；".join(problems[:2])))
                     del replacements[name]
-        result["errors"].extend(bad)
         if not replacements:
+            PROGRESS.done(token=tok)
             continue
-        path = STATE.archive_path(key)
-        PROGRESS.update(detail="正在重打包归档 %s …" % GAMES[key]["dat"],
-                        token=tok)
-        ensure_backup(path, comment)
         idx_map = {}
         for name, blob in replacements.items():
             i = a.index_of(name)
             if i >= 0:
                 idx_map[i] = blob
+        PROGRESS.update(detail="正在重打包归档 %s …" % GAMES[key]["dat"],
+                        token=tok)
         try:
-            a.save_patched(path, idx_map)
-        except PermissionError:
-            raise ApiError("文件被占用：请先关闭游戏（th12.exe / th12c.exe）")
-        STATE.anm_cache = {}
-        STATE.texture_index = {}
-        result["files"] += len(replacements)
+            blob = a.to_bytes_patched(idx_map)
+        except Exception:
+            PROGRESS.done(token=tok)
+            raise
+        archives[key] = {"blob": blob,
+                         "tmp": STATE.archive_path(key) + ".new",
+                         "path": STATE.archive_path(key)}
+        arch_items[key] = items
+        result["errors"].extend(bad)
+        PROGRESS.done(token=tok)
+
+    # ---- 3) 两阶段提交：先把所有临时文件落盘，成功后才逐个替换 ----
+    # 这一步的顺序很关键。以前是「先替换 thbgm.dat，再去写归档里的 thbgm.fmt」，
+    # 第二步失败就留下【新音乐 + 旧偏移表】的组合，游戏里音乐直接错位。
+    # 现在所有内容先写成临时文件并落盘，确认全部成功再统一替换。
+    temps = []
+    try:
+        if temp_bgm and os.path.isfile(temp_bgm):
+            temps.append(temp_bgm)
+        for key, item in archives.items():
+            _write_durable(item["tmp"], item["blob"])
+            temps.append(item["tmp"])
+
+        # 备份必须在替换之前做完（备份的是"当前"内容）
+        if temp_bgm:
+            ensure_backup(BGM_DAT, comment)
+        for key, item in archives.items():
+            ensure_backup(item["path"], comment)
+
+        if temp_bgm:
+            os.replace(temp_bgm, BGM_DAT)
+            result["bgm"] = True
+        for key, item in archives.items():
+            os.replace(item["tmp"], item["path"])
+    except PermissionError:
+        for tmp in temps:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise ApiError("文件被占用：请先关闭游戏（th12.exe / th12c.exe）")
+    except Exception:
+        # 失败就把临时文件清掉；此时还没有替换任何游戏文件，
+        # 最多是"先替换的那几个"已经生效（os.replace 本身是原子的）
+        for tmp in temps:
+            if os.path.isfile(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+        raise
+
+    # ---- 4) 提交成功后再更新内存状态、写日志 ----
+    if result["bgm"]:
+        log("保存BGM修改", "%d 首替换 / %d 首循环点"
+            % (len(bgm_pending), len(bgm_loop)),
+            comment or human_size(os.path.getsize(BGM_DAT)))
+    for key, item in archives.items():
+        items = arch_items.get(key, [])
+        with STATE.lock:
+            # 归档内容变了，内存缓存必须一起丢掉 ——
+            # 只清 anm_cache/texture_index 不够：STATE.archives 里缓存的
+            # Archive 对象还持有替换前的条目表，下一次读（例如
+            # /api/musiccmt）会从它读出旧内容，而磁盘其实已经是新的。
+            STATE.archives.pop(key, None)
+            STATE.fmt = None
+            STATE.anm_cache = {}
+            STATE.texture_index = {}
+        result["files"] += len(items)
         for it in items:
             log(it["action"], "%s / %s" % (GAMES[key]["label"], it["name"]),
                 (it["detail"] + ("　备注: " + comment if comment else "")))
 
-    # ---- 3) 清空暂存 ----
+    # ---- 5) 清空暂存 ----
     clear_pending()
     PROGRESS.done()
     return result
@@ -1279,62 +1352,6 @@ def bgm_cancel():
     if n:
         log("放弃BGM修改", "%d 项" % n)
     return {"ok": True}
-
-
-def _apply_bgm(job):
-    fmt = STATE.bgm_fmt()
-    replaced = len(STATE.bgm_pending)
-    loops = len(STATE.bgm_loop)
-    # 1) 应用循环点
-    for idx, loop in STATE.bgm_loop.items():
-        fmt.tracks[idx].loop = loop
-    # 2) 重建 thbgm.dat 到临时文件
-    new_dat = BGM_DAT + ".new"
-    job["message"] = "正在重建 thbgm.dat…"
-
-    def progress(done, total):
-        job["progress"] = done / float(total)
-
-    bgm.rebuild_bgm_dat(BGM_DAT, new_dat, STATE.bgm_pending, fmt,
-                        progress=progress)
-    # 3) 更新两个归档里的 thbgm.fmt（先写临时文件）
-    fmt_bytes = fmt.to_bytes()
-    job["message"] = "正在更新 thbgm.fmt…"
-    job["progress"] = 1.0
-    new_archives = {}
-    for key in STATE.available_games():
-        a = STATE.archive(key)
-        idx = a.index_of("thbgm.fmt")
-        blob = a.to_bytes_patched({idx: fmt_bytes})
-        path = STATE.archive_path(key) + ".new"
-        with open(path, "wb") as f:
-            f.write(blob)
-            f.flush()
-            os.fsync(f.fileno())
-        new_archives[key] = path
-    # 4) 备份 + 原子替换
-    job["message"] = "正在备份原文件…"
-    ensure_backup(BGM_DAT)
-    for key in STATE.available_games():
-        ensure_backup(STATE.archive_path(key))
-    job["message"] = "正在写入…"
-    os.replace(new_dat, BGM_DAT)
-    for key, path in new_archives.items():
-        os.replace(path, STATE.archive_path(key))
-    # 5) 重新加载内存状态
-    with STATE.lock:
-        for path in STATE.bgm_pending.values():
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-        STATE.bgm_pending = {}
-        STATE.bgm_loop = {}
-        STATE.bgm_replaced = set()
-        STATE.invalidate()
-    job["message"] = "完成"
-    log("应用BGM修改", "%d 首替换 / %d 首循环点" % (replaced, loops),
-        human_size(os.path.getsize(BGM_DAT)))
 
 
 def start_bgm_apply(comment=""):
@@ -1540,6 +1557,7 @@ def config_info():
                            else "th12c.exe")
         exes[key] = os.path.basename(exe) if os.path.isfile(exe) else None
     cfg = load_config()
+    problems, notes = diagnose_game_dir(GAME_DIR, games) if games else ([], [])
     return {
         "game_dir": GAME_DIR,
         "dir_exists": os.path.isdir(GAME_DIR),
@@ -1547,7 +1565,8 @@ def config_info():
         "exes": exes,
         "candidates": find_candidates(),
         "config_path": CONFIG_PATH,
-        "problems": diagnose_game_dir(GAME_DIR, games) if games else [],
+        "problems": problems,
+        "notes": notes,
         "recent_dirs": [p for p in (cfg.get("recent_dirs") or [])
                         if os.path.isdir(p)],
     }
@@ -1561,8 +1580,14 @@ def diagnose_game_dir(path, keys):
     只有**真的读失败**（数据被截断 / 解压报错）才算坏。
 
     为了快，只抽查几个小条目 + 当前要用到的 thbgm.fmt，不整包解压。
+
+    返回 ``(问题列表, 提示列表)``：问题是「不能用/有风险」，
+    提示是「能用，但你最好知道」。两者分开，因为界面上前者要标红、
+    后者只是说明 —— 例如条目表长度与数据流不一致，官方工具也是
+    「解出多少算多少」，不该把整份归档判成坏的。
     """
     problems = []
+    notes = []
     for key in keys:
         dat = os.path.join(path, GAMES[key]["dat"])
         label = GAMES[key]["label"]
@@ -1598,7 +1623,16 @@ def diagnose_game_dir(path, keys):
                                 "（归档可能被写坏，建议用备份文件还原）"
                                 % (label, e.name, ex))
                 break
-    return problems
+
+        # ③ 条目表长度与数据流不一致：只提示，不拦（见 docstring）
+        partial = getattr(ar, "partial_entries", None) or []
+        if partial:
+            sample = "、".join(p[0] for p in partial[:3])
+            notes.append(
+                "%s 有 %d 个条目的长度与归档记录不一致（如 %s …）："
+                "这些文件导出后可能不完整，但贴图/对话仍可正常使用"
+                % (label, len(partial), sample))
+    return problems, notes
 
 
 def check_path_info(path):
@@ -1641,9 +1675,12 @@ def check_path_info(path):
         if note:
             # 例如「已根据文件定位到目录：…」，另起一行，别和上面的状态挤在一起
             info["message"] += "\n" + note
-        info["problems"] = diagnose_game_dir(resolved, found)
+        info["problems"], info["notes"] = diagnose_game_dir(resolved, found)
         if info["problems"]:
             info["message"] += "\n⚠ " + info["problems"][0].splitlines()[0]
+        elif info["notes"]:
+            # 能用，但有需要知情的地方（例如条目长度与记录不一致）
+            info["message"] += "\n注：" + info["notes"][0].splitlines()[0]
         return info
 
     # 这里不是游戏目录：看看是不是「指到了上一级」，直接把正确路径找出来
@@ -1653,7 +1690,7 @@ def check_path_info(path):
         info.update({"suggest": sub, "games": games})
         info["message"] = ("这个目录本身没有 th12.dat / th12c.dat，"
                            "但里面有一份游戏：\n%s" % sub)
-        info["problems"] = diagnose_game_dir(sub, games)
+        info["problems"], info["notes"] = diagnose_game_dir(sub, games)
         return info
     info["message"] = ("这个目录里没有 th12.dat 或 th12c.dat。\n"
                        "请选「里面直接放着 th12.dat / th12c.dat」"
@@ -1711,12 +1748,17 @@ def set_config(payload):
     info = config_info()
     info["used_parent"] = bool(suggest)
     info["from_file"] = from_file
+    msgs = []
     if note:
-        info["message"] = note
+        msgs.append(note)
     if suggest:
         info["suggest"] = suggest
-        info["message"] = ("你选的目录里没有游戏数据，已自动改用里面的：\n%s"
-                           % suggest)
+        msgs.append("你选的目录里没有游戏数据，已自动改用里面的：\n%s" % suggest)
+    if not info.get("problems") and info.get("notes"):
+        # 能用但有需要知情的地方（例如条目长度与归档记录不一致）
+        msgs.append("注：" + info["notes"][0])
+    if msgs:
+        info["message"] = "\n".join(msgs)
     if info.get("problems"):
         info["warning"] = "；".join(p.splitlines()[0] for p in info["problems"])
     if warn:
