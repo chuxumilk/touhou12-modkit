@@ -119,23 +119,34 @@
 
 ---
 
+### ✅ 前端：「循环点存不下去」+ 译文编码 + boot 容错（提交 `db14524`）
+- **只改循环点无法保存**：`/api/bgm` 的 `pending_count` 只统计替换曲目、
+  不含 `bgm_loop`，而按钮状态读它、底部条读 `/api/pending` ——
+  两个数据源不一致。只设循环点时两个按钮都 disabled、底部条不刷新，
+  界面上没有任何保存入口，必须刷新页面。修法：`setBgmLoop()` 补
+  `loadPending()`；新增 `applyBgmButtons()` 统一以 `/api/pending` 为准。
+- **译文编码**：导出对话文档加 UTF-8 BOM（编辑器靠它判断编码，
+  否则「另存为 ANSI」会写成 GBK）；前端新增 `sniffDocEncoding()`
+  在导入前探测编码 —— `File.text()` 是硬性 UTF-8，GBK 字节在浏览器里
+  就变成 U+FFFD，后端再容错也救不回来。判为 GBK/UTF-16 时提示并默认不继续。
+- **`pickFile()` 取消对话框时永不 resolve** → 现在 focus 兜底，取消也 resolve。
+- **`boot()` 容错**：新增 `refreshAll()`，四个刷新各自 try/catch，
+  任一失败不再中断其它页签，也不会用笼统的「初始化失败」盖掉具体提示。
+- 新增 `_test/cdp_encoding.js`（真实浏览器，13 项）。
+
+---
+
 ## 待修
 
-### 🟠 前端（子代理报告，摘录高优先级）
+### 🟠 前端（子代理报告，剩余）
 
-- **只改「循环点」后无法保存**：`/api/bgm` 的 `pending_count` 只算替换曲目、
-  不含 `bgm_loop`，而 `setBgmLoop()` 不调 `loadPending()` →
-  两个按钮都 disabled、底部条不出现，必须刷新页面才能存。
-  （一行级修复：补 `loadPending()`，按钮状态改读 `/api/pending`）
 - **保存过程中可关掉对话框**，且无并发保护 → 可能同时跑两个 `/api/save`。
   加 `S.saving` 在途标志 + 在途禁用取消与遮罩关闭。
-- **对话文档导入硬按 UTF-8 解码**：`File.text()` 是硬性 UTF-8，
-  GBK 保存的译文在进后端前就变成 U+FFFD。导出侧写个 BOM 即可
-  （后端已用 `utf-8-sig`，但导出从不写 BOM，容错形同虚设）。
-- `boot()` 里任一接口失败会中止后续初始化，并用笼统的「初始化失败」
-  盖掉具体提示。
-- 搜索结果的过期响应会覆盖界面；`pickFile()` 在取消对话框时永不 resolve；
-  `#btn-export-zip` 在搜索态会导出别的 ANM。
+- 搜索结果的过期响应会覆盖界面（加请求序号丢弃过期响应）
+- `#btn-export-zip` 在搜索态会导出别的 ANM（`showSearchResult` 没设 `S.exportAnm`）
+- 单例 toast 互相覆盖：同一 tick 连发多条只剩最后一条
+- 多处 `api()` 没有 catch → 失败静默无提示
+- 进度轮询泄漏：`startProgressWatch()` 在 try 内、`stopProgressWatch()` 只在成功路径
 
 ### 🟡 健壮性（子代理报告，部分已验证）
 
