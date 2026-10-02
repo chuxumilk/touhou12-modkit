@@ -90,6 +90,16 @@ function Invoke-PyTest {
 function Invoke-NodeTest {
     param([string]$Name, [string]$Script, [string[]]$Extra = @())
     if ($SkipBrowser) { return }
+    # Reset the server before every browser suite: these suites mutate state
+    # (e.g. cdp_bgm replaces track 0 with a 20s clip), and a later suite
+    # assuming pristine data would then fail for the wrong reason.
+    Start-TestServer | Out-Null
+    $body = @{ game_dir = $env:TH12_GAME_DIR } | ConvertTo-Json -Compress
+    try {
+        Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/config" -Method POST `
+            -Body ([Text.Encoding]::UTF8.GetBytes($body)) `
+            -ContentType "application/json" -UseBasicParsing -TimeoutSec 30 | Out-Null
+    } catch { }
     $a = @("_test\$Script", $Port, $DebugPort) + $Extra
     $out = & node @a 2>&1
     $code = $LASTEXITCODE
@@ -141,11 +151,15 @@ if ($SkipBrowser) {
     if (-not $chromeExe) {
         Write-Host "  Chrome/Edge not found - skipping browser suites" -ForegroundColor Yellow
     } else {
+        # --autoplay-policy: the wave-player suite needs autoplay to work.
+        # Headless Chrome blocks autoplay by default, so audio metadata would
+        # never load and seeking (click-to-jump) would silently do nothing.
         $script:Chrome = Start-Process $chromeExe -ArgumentList @(
             "--headless=new", "--remote-debugging-port=$DebugPort",
             "--remote-allow-origins=*", "--user-data-dir=$profile",
             "--no-first-run", "--no-default-browser-check",
-            "--disable-gpu", "--disable-crashpad", "--no-sandbox", "about:blank"
+            "--disable-gpu", "--disable-crashpad", "--no-sandbox",
+            "--autoplay-policy=no-user-gesture-required", "about:blank"
         ) -WindowStyle Hidden -PassThru
         Start-Sleep -Seconds 5
         Start-TestServer | Out-Null
@@ -159,6 +173,7 @@ if ($SkipBrowser) {
         Invoke-NodeTest "browser:one-dir"   "cdp_one_dir.js"   @($env:TH12_GAME_DIR)
         Invoke-NodeTest "browser:encoding"  "cdp_encoding.js"
         Invoke-NodeTest "browser:bgm"       "cdp_bgm.js"
+        Invoke-NodeTest "browser:wave"      "cdp_wave.js"
     }
 }
 

@@ -724,8 +724,7 @@ function renderBgm() {
           ? '<br><span class="muted" style="font-size:11px">待保存</span>'
           : ""}</td>
       <td>${status}</td>
-      <td><audio controls preload="none"
-           src="/api/bgm.wav?index=${t.index}&t=${t.pending ? Date.now() : 0}"></audio></td>
+      <td><button class="mini" data-act="play">▶ 试听</button></td>
       <td><div class="row-actions">
         <button class="mini" data-act="replace">替换</button>
         <button class="mini" data-act="loop">设置循环点</button>
@@ -733,6 +732,7 @@ function renderBgm() {
       </div></td>`;
     tr.querySelector('[data-act="replace"]').onclick = () => replaceBgm(t);
     tr.querySelector('[data-act="loop"]').onclick = () => setBgmLoop(t);
+    tr.querySelector('[data-act="play"]').onclick = () => openWavePlayer(t);
     tr.querySelector('[data-act="download"]').onclick = () => {
       const a = document.createElement("a");
       a.href = `/api/bgm.wav?index=${t.index}`;
@@ -742,6 +742,291 @@ function renderBgm() {
     tbody.appendChild(tr);
   });
 }
+
+/* ---------------- 波形播放器 ---------------- */
+// 画出波形、循环区、A/B 标记与播放头，并支持点波形跳转 / 拖标记改循环点。
+const WAVE = {
+  index: null,          // 当前曲目
+  peaks: null,          // 0..100 的包络数组
+  sec: 0,               // 总时长（秒）
+  loopBytes: 0,         // 当前循环点（字节）
+  pending: false,       // 该循环点是否还没保存
+  drag: null,           // "A" | null
+  timer: null,          // 播放头刷新定时器
+  raf: null,
+};
+
+function fmtSec(s) {
+  s = Math.max(0, s || 0);
+  const m = Math.floor(s / 60);
+  return `${m}:${(s % 60).toFixed(1).padStart(4, "0")}`;
+}
+
+function bgmWaveWidth() {
+  const c = $("#bgm-canvas");
+  if (!c) return 600;
+  const r = c.getBoundingClientRect();
+  return Math.max(120, Math.round(r.width));
+}
+
+function drawWave() {
+  const canvas = $("#bgm-canvas");
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = bgmWaveWidth();
+  const cssH = canvas.clientHeight || 120;
+  if (canvas.width !== Math.round(cssW * dpr) ||
+      canvas.height !== Math.round(cssH * dpr)) {
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const peaks = WAVE.peaks || [];
+  if (!peaks.length) return;
+  const mid = cssH / 2;
+  const scale = (cssH / 2 - 6) / 100;
+
+  // B（曲尾）与 A（循环点）在像素上的位置
+  const xOf = (sec) => Math.max(0, Math.min(cssW,
+    (sec / Math.max(0.001, WAVE.sec)) * cssW));
+  const xA = xOf(WAVE.loopBytes / 176400);
+
+  // 1) 循环区底色（A → 末尾）
+  ctx.fillStyle = "rgba(96, 165, 250, .13)";
+  ctx.fillRect(xA, 0, cssW - xA, cssH);
+
+  // 2) 波形（逐列取包络，比画 peaks.length 条线更贴合画布宽度）
+  const colW = cssW / peaks.length;
+  for (let i = 0; i < peaks.length; i++) {
+    const x = i * colW;
+    const h = Math.max(1, peaks[i] * scale);
+    // 循环区内的波形高亮一点，一眼能看出会循环哪一段
+    ctx.fillStyle = x >= xA ? "#8ab4f8" : "#5b6b86";
+    ctx.fillRect(x, mid - h, Math.max(1, colW * 0.8), h * 2);
+  }
+
+  // 3) A / B 标记
+  const mark = (x, label, color) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, cssH);
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.fillRect(Math.max(0, Math.min(cssW - 16, x - 8)), 0, 16, 13);
+    ctx.fillStyle = "#0b0e14";
+    ctx.font = "bold 10px Consolas, monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(label, Math.max(8, Math.min(cssW - 8, x)), 10);
+  };
+  mark(xA, "A", "#60a5fa");
+  if (xOf(WAVE.sec) < cssW - 2) mark(xOf(WAVE.sec), "B", "#8b98ad");
+
+  // 4) 播放头
+  const audio = $("#bgm-audio");
+  if (audio && audio.currentTime > 0) {
+    const x = xOf(audio.currentTime);
+    ctx.strokeStyle = "#e8eaf0";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, cssH);
+    ctx.stroke();
+    const jx = audio.currentTime >= WAVE.sec - 0.15 && WAVE.loopBytes > 0
+      ? xOf(WAVE.loopBytes / 176400) : x;
+    if (jx !== x) {
+      ctx.fillStyle = "#60a5fa";
+      ctx.beginPath();
+      ctx.arc(jx, cssH - 6, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function updateWaveSide() {
+  const audio = $("#bgm-audio");
+  $("#bgm-cur").textContent = fmtSec(audio ? audio.currentTime : 0);
+  $("#bgm-total").textContent = fmtSec(WAVE.sec);
+  $("#bgm-loop-show").textContent = (WAVE.loopBytes / 176400).toFixed(2);
+  const note = $("#bgm-loop-note");
+  if (WAVE.pending) {
+    note.textContent = "（未保存）";
+  } else if (WAVE.loopBytes === 0) {
+    note.textContent = "（从头循环）";
+  } else {
+    note.textContent = "";
+  }
+  $(".player-loop").classList.toggle("dirty", !!WAVE.pending);
+  const btn = $("#bgm-play");
+  if (btn && audio) btn.textContent = audio.paused ? "▶ 播放" : "⏸ 暂停";
+}
+
+async function openWavePlayer(t) {
+  WAVE.index = t.index;
+  WAVE.peaks = null;
+  WAVE.sec = t.duration || 0;
+  WAVE.loopBytes = (t.pending_loop != null ? t.pending_loop : t.loop) || 0;
+  WAVE.pending = t.pending_loop != null;
+  $("#bgm-player").classList.remove("hidden");
+  $("#bgm-player-title").textContent =
+    `${t.index}. ${t.name}` + (t.pending_size != null ? "（已替换）" : "");
+  const hint = $("#bgm-wave-hint");
+  hint.textContent = "正在计算波形…";
+  hint.className = "wave-hint";
+  updateWaveSide();
+  drawWave();
+
+  const audio = $("#bgm-audio");
+  // cache-bust：替换过曲目时要让浏览器重新拉新的音频
+  audio.src = `/api/bgm.wav?index=${t.index}&t=${t.pending_size != null
+    ? Date.now() : 0}`;
+  audio.playbackRate = 1;
+
+  try {
+    const res = await api(`/api/bgm.peaks?index=${t.index}&points=900`);
+    WAVE.peaks = res.peaks || [];
+    WAVE.sec = res.seconds || WAVE.sec;
+    hint.className = "wave-hint hidden";
+    drawWave();
+    updateWaveSide();
+  } catch (ex) {
+    hint.textContent = "波形计算失败：" + ex.message + "（不影响试听与保存）";
+    hint.className = "wave-hint error";
+  }
+}
+
+function waveTimeAt(clientX) {
+  const c = $("#bgm-canvas");
+  const r = c.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+  return frac * WAVE.sec;
+}
+
+/**
+ * 跳转到某个位置。
+ *
+ * 不能直接写 `audio.currentTime = t` 就完事：音频元数据还没加载完时
+ * 浏览器会**静默忽略**这次赋值（readyState 为 0 时没有时长信息），
+ * 表现就是「点了波形没反应」。这里在没就绪时先记下来，
+ * 等 loadedmetadata / canplay 到了再补一次。
+ */
+function seekWaveTo(sec) {
+  const audio = $("#bgm-audio");
+  if (!audio) return;
+  if (audio.readyState >= 1) {
+    try {
+      audio.currentTime = sec;
+      updateWaveSide();
+      drawWave();
+      return;
+    } catch (ex) { /* 落到下面重试 */ }
+  }
+  WAVE.pendingSeek = sec;
+  const retry = () => {
+    if (WAVE.pendingSeek == null) return;
+    try {
+      audio.currentTime = WAVE.pendingSeek;
+      WAVE.pendingSeek = null;
+      updateWaveSide();
+      drawWave();
+    } catch (ex) { /* 再等下一次事件 */ }
+  };
+  audio.addEventListener("loadedmetadata", retry, { once: true });
+  audio.addEventListener("canplay", retry, { once: true });
+}
+
+$("#bgm-canvas").onclick = (e) => {
+  if (!WAVE.sec) return;
+  seekWaveTo(waveTimeAt(e.clientX));
+};
+
+// 拖动 A（循环点）标记
+$("#bgm-canvas").onmousedown = (e) => {
+  const c = $("#bgm-canvas");
+  const r = c.getBoundingClientRect();
+  const xA = (WAVE.loopBytes / 176400 / Math.max(0.001, WAVE.sec)) * r.width;
+  if (Math.abs(e.clientX - r.left - xA) <= 10) {
+    WAVE.drag = "A";
+    e.preventDefault();
+  }
+};
+window.addEventListener("mousemove", (e) => {
+  if (WAVE.drag !== "A") return;
+  const sec = waveTimeAt(e.clientX);
+  WAVE.loopBytes = Math.max(0, Math.round(sec * 176400));
+  WAVE.pending = true;              // 还没点「设置循环点」，先标记未保存
+  drawWave();
+  updateWaveSide();
+});
+window.addEventListener("mouseup", () => {
+  if (WAVE.drag === "A") {
+    WAVE.drag = null;
+    const input = document.querySelector(`input[data-loop="${WAVE.index}"]`);
+    if (input) input.value = (WAVE.loopBytes / 176400).toFixed(1);
+    // 拖完自动提交，和点「设置循环点」等价
+    const tr = document.querySelector("#bgm-table tbody tr");
+    if (input) setBgmLoop({ index: WAVE.index });
+  }
+});
+
+$("#bgm-play").onclick = () => {
+  const audio = $("#bgm-audio");
+  if (!audio) return;
+  if (audio.paused) audio.play().catch(() => { });
+  else audio.pause();
+};
+$("#bgm-stop").onclick = () => {
+  const audio = $("#bgm-audio");
+  if (!audio) return;
+  audio.pause();
+  audio.currentTime = 0;
+  updateWaveSide();
+  drawWave();
+};
+$("#bgm-loop-here").onclick = () => {
+  const audio = $("#bgm-audio");
+  if (!audio) return;
+  WAVE.loopBytes = Math.round((audio.currentTime || 0) * 176400);
+  const input = document.querySelector(`input[data-loop="${WAVE.index}"]`);
+  if (input) input.value = (WAVE.loopBytes / 176400).toFixed(1);
+  setBgmLoop({ index: WAVE.index });
+};
+
+// 播放时刷新播放头；不用 setInterval 常驻，播放/暂停时开关
+function startWaveTimer() {
+  if (WAVE.timer) return;
+  WAVE.timer = setInterval(() => {
+    const audio = $("#bgm-audio");
+    if (!audio) return;
+    updateWaveSide();
+    drawWave();
+    // 到曲尾就跳回循环点，模拟游戏里的循环行为
+    if (!audio.paused && WAVE.sec && audio.currentTime >= WAVE.sec - 0.08) {
+      try {
+        audio.currentTime = WAVE.loopBytes / 176400;
+      } catch (ex) { /* 忽略 */ }
+    }
+  }, 120);
+}
+function stopWaveTimer() {
+  if (WAVE.timer) {
+    clearInterval(WAVE.timer);
+    WAVE.timer = null;
+  }
+}
+(function hookAudio() {
+  const audio = $("#bgm-audio");
+  if (!audio) return;
+  audio.onplay = startWaveTimer;
+  audio.onpause = () => { stopWaveTimer(); updateWaveSide(); drawWave(); };
+  audio.onended = () => { stopWaveTimer(); updateWaveSide(); drawWave(); };
+  audio.onloadedmetadata = () => { updateWaveSide(); drawWave(); };
+})();
+window.addEventListener("resize", () => { drawWave(); });
 
 async function replaceBgm(t) {
   const file = await pickFile("audio/*,.wav,.mp3,.ogg,.flac");
@@ -766,6 +1051,14 @@ async function setBgmLoop(t) {
       `/api/bgm.loop?index=${t.index}&loop=${Math.round(sec * 44100 * 4)}`,
       { method: "POST" });
     toast(`循环点已设为 ${(res.loop / 176400).toFixed(2)} 秒`);
+    // 播放器里那份状态也要跟上 —— 否则波形上的 A 标记还停在旧位置，
+    // 和表格输入框显示的值对不上（用户会以为没生效）。
+    if (WAVE.index === t.index) {
+      WAVE.loopBytes = res.loop || 0;
+      WAVE.pending = true;
+      drawWave();
+      updateWaveSide();
+    }
     await loadBgm();
     // 必须刷新待保存列表：否则按钮状态与底部待保存条都不会更新，
     // 用户改完循环点却找不到保存入口（只能刷新页面）。

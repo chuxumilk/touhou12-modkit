@@ -103,8 +103,44 @@
       </div>
       <p class="hint">替换曲目：上传 WAV（自动转成 16bit / 立体声 / 44100Hz）。
         循环点 = 曲目内循环回到的位置（秒），0 表示从头循环。
-        所有修改都会先**暂存**，点页面底部的「保存到游戏」才会真正写入
+        所有修改都会先<b>暂存</b>，点页面底部的「保存到游戏」才会真正写入
         （重建 thbgm.dat 约 400MB，需要一点时间）。</p>
+
+      <!-- 波形播放器：试听 + 循环点可视化 -->
+      <div id="bgm-player" class="player hidden">
+        <div class="player-main">
+          <div class="player-wave">
+            <canvas id="bgm-canvas"></canvas>
+            <div id="bgm-wave-hint" class="wave-hint">正在计算波形…</div>
+          </div>
+          <div class="player-side">
+            <div class="player-title" id="bgm-player-title">曲目</div>
+            <div class="player-time">
+              <span id="bgm-cur">0:00.0</span>
+              <span class="muted"> / </span>
+              <span id="bgm-total" class="muted">0:00.0</span>
+            </div>
+            <div class="player-loop">循环点
+              <b id="bgm-loop-show">0.00</b> 秒
+              <span class="muted" id="bgm-loop-note"></span>
+            </div>
+            <div class="player-btns">
+              <button id="bgm-play" class="mini">▶ 播放</button>
+              <button id="bgm-stop" class="mini">⏹ 停止</button>
+              <button id="bgm-loop-here" class="mini"
+                      title="把循环点设为当前播放位置">↺ 设为当前位置</button>
+            </div>
+            <!-- preload="metadata"：要让「点波形跳转」在还没播放时就能生效。
+                 preload="none" 时浏览器没有时长信息，给 currentTime 赋值会被忽略。 -->
+            <audio id="bgm-audio" preload="metadata"></audio>
+          </div>
+        </div>
+        <p class="hint player-hint">
+          <b>点波形</b>跳到该位置 ·
+          <b>拖动 A / B 标记</b>改循环点（B 固定为曲尾）·
+          右侧 <b>↺</b> 可把循环点设为当前播放位置
+        </p>
+      </div>
       <div id="bgm-progress" class="progress hidden"><div></div></div>
       <table class="table" id="bgm-table">
         <thead>

@@ -10,6 +10,7 @@
 """
 
 import argparse
+import array
 import io
 import json
 import os
@@ -1371,6 +1372,98 @@ def bgm_wav(index):
     return bgm.to_wav(pcm)
 
 
+# 波形包络缓存：{(索引, 文件mtime, 长度, 点数): peaks}
+_PEAK_CACHE = {}
+_PEAK_CACHE_MAX = 24
+_PEAK_WARMING = set()
+
+
+def warm_up_bgm_peaks():
+    """后台把所有曲目的波形算一遍，这样用户点开音乐页时是秒开的。
+
+    注意：这里会读 thbgm.dat 的每一段（约 400 MB 顺序读），
+    用后台线程跑，不挡任何请求。算好的结果进 _PEAK_CACHE。
+    """
+    try:
+        fmt = STATE.bgm_fmt()
+    except Exception:
+        return
+    for t in fmt.tracks:
+        try:
+            bgm_peaks(t.index, 900)
+        except Exception:
+            continue
+
+
+def bgm_peaks(index, points=900):
+    """计算某条曲目的波形包络（给界面画波形用）。
+
+    只读出 PCM 的**峰值**，不做解码：每 ``block`` 个采样取一次最大绝对值，
+    所以哪怕是一首 12 MB 的曲子也能很快算完（纯 Python 逐字节，几万次循环）。
+    结果按「索引 + 文件 mtime + 长度 + 点数」缓存，重复开同一首不再重算。
+    """
+    fmt = STATE.bgm_fmt()
+    if index < 0 or index >= len(fmt.tracks):
+        raise ApiError("曲目序号不存在", 404)
+    points = max(60, min(int(points), 4000))
+    t = fmt.tracks[index]
+    path = STATE.bgm_pending.get(index)
+    if not path:
+        path = None                                    # 走 thbgm.dat
+    try:
+        mtime = os.path.getmtime(path or BGM_DAT)
+    except OSError:
+        mtime = 0
+    length = _pending_pcm_len(index) or t.end
+    key = (index, mtime, length, points)
+    cached = _PEAK_CACHE.get(key)
+    if cached:
+        return cached
+
+    step = max(1, length // points)
+    n_chunks = max(1, (length + step - 1) // step)
+    peaks = []
+    left = length
+    src = open(path, "rb") if path else open(BGM_DAT, "rb")
+    try:
+        if not path:
+            src.seek(t.offset)
+        read = src.read
+        for _ in range(n_chunks):
+            if left <= 0:
+                break
+            chunk = read(min(step, left))
+            if not chunk:
+                break
+            # 16bit 小端立体声，每 4 字节一帧（L低 L高 R低 R高）。
+            # 必须按 16bit 有符号**完整解析**，不能图快只取高位字节：
+            # 单个字节 0x48=72，而它其实是 0x4848=18504 的低字节，
+            # 只取字节会把振幅算错（实测算出 83558，实际峰值 30178）。
+            arr = array.array("h")
+            arr.frombytes(chunk[:len(chunk) // 2 * 2])
+            if arr:
+                peak = max(abs(min(arr)), abs(max(arr)))
+            else:
+                peak = 0
+            peaks.append(peak)
+            left -= len(chunk)
+    finally:
+        src.close()
+
+    if len(_PEAK_CACHE) >= _PEAK_CACHE_MAX:
+        _PEAK_CACHE.clear()
+    result = {
+        "index": index,
+        "name": t.name,
+        "points": len(peaks),
+        # 归一化到 0..100，前端直接按高度画；原始峰值为 16bit 有符号
+        "peaks": [min(100, int(p * 100 / 32768)) for p in peaks],
+        "seconds": length / float(bgm.BYTES_PER_SEC) if bgm.BYTES_PER_SEC else 0,
+    }
+    _PEAK_CACHE[key] = result
+    return result
+
+
 def bgm_replace(index, wav_data):
     fmt = STATE.bgm_fmt()
     if index < 0 or index >= len(fmt.tracks):
@@ -2592,6 +2685,48 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj, ensure_ascii=False),
                    "application/json; charset=utf-8")
 
+    def _send_ranged(self, body, content_type, extra_headers=None):
+        """发送可能被 Range 请求切片的响应（音频这类大二进制）。
+
+        为什么需要：浏览器要**在音频里跳转**（拖进度条、点波形跳转）
+        必须能发 Range 请求拿部分内容。以前不理会 Range、一律返回 200 全量，
+        结果是 `audio.currentTime = 33` 被浏览器**静默忽略**
+        （实测：readyState=4、无错误，但 currentTime 始终是 0），
+        表现就是「点了波形没反应」「试听拖不动进度条」。
+        """
+        total = len(body)
+        rng = (self.headers.get("Range") or "").strip()
+        base = {"Accept-Ranges": "bytes"}
+        if extra_headers:
+            base.update(extra_headers)
+
+        m = re.match(r"bytes=(\d*)-(\d*)$", rng)
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = int(m.group(2)) if m.group(2) else total - 1
+            else:                        # bytes=-N：最后 N 字节
+                start = max(0, total - int(m.group(2)))
+                end = total - 1
+            start = max(0, min(start, max(0, total - 1)))
+            end = max(start, min(end, total - 1))
+            chunk = body[start:end + 1]
+            self.send_response(206)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(chunk)))
+            self.send_header("Content-Range",
+                             "bytes %d-%d/%d" % (start, end, total))
+            self.send_header("Cache-Control", "no-store")
+            for k, v in base.items():
+                self.send_header(k, v)
+            self.end_headers()
+            try:
+                self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionAbortedError):
+                pass
+            return
+        self._send(200, body, content_type, base)
+
     def _error(self, message, code=400):
         self._json({"error": message}, code)
 
@@ -2676,12 +2811,21 @@ class Handler(BaseHTTPRequestHandler):
         if route == "texture.png":
             data = texture_png(q.get("game", "jp"), q.get("anm", ""),
                                int(q.get("index", "0")))
-            return self._send(200, data, "image/png")
+            return self._send_ranged(data, "image/png")
         if route == "bgm":
             return self._json(list_bgm())
         if route == "bgm.wav":
+            # 走 _send_ranged：浏览器要在音频里跳转（拖进度条/点波形），
+            # 必须支持 Range 请求，否则 currentTime 赋值会被静默忽略。
             data = bgm_wav(int(q.get("index", "0")))
-            return self._send(200, data, "audio/wav")
+            return self._send_ranged(data, "audio/wav")
+        if route == "bgm.peaks":
+            # 波形数据只跟音频内容有关，可以缓存（其余接口都是 no-store）
+            res = bgm_peaks(int(q.get("index", "0")),
+                            int(q.get("points", "900")))
+            return self._send(200, json.dumps(res, ensure_ascii=False),
+                              "application/json; charset=utf-8",
+                              {"Cache-Control": "private, max-age=600"})
         if route == "msg":
             return self._json(get_msg(q.get("game", "jp"),
                                       q.get("name", "")))
