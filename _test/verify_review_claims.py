@@ -132,11 +132,58 @@ def c_msg_empty():
     edited = "\n".join(lines)
     changed, unmatched, bad, changes = msg.import_document(
         edited, msg.MsgFile.from_bytes(raw, enc), enc, dry_run=True)
-    return (changed > 0), ("把第 %d 行正文删空 → changed=%d unmatched=%d"
-                           % (changed_line, changed, len(unmatched)))
+    # 修复后期望：不再被当成修改，而是作为「无法识别」的行报出来
+    return (changed > 0 or len(unmatched) == 0), \
+        ("把第 %d 行正文删空 → changed=%d unmatched=%d"
+         % (changed_line, changed, len(unmatched)))
 
 
 claim("删空正文被当成一次「改成空文本」的修改", True, c_msg_empty)
+
+# ---------------------------------------------------------------- P0-3b
+print("\n### P0-3b 有编不出来的字符时是否拒绝写入（不静默变 ?）")
+
+
+def c_msg_badchar():
+    """往正文里塞一个 cp932 表示不了的字符（'汉'），看导入是先报错还是照写。"""
+    dat = os.path.join(GAME, "th12.dat")
+    if not os.path.isfile(dat):
+        return None, "找不到 th12.dat"
+    a = archive.Archive.from_file(dat)
+    name = next((e.name for e in a.entries if e.name.endswith(".msg")), None)
+    if not name:
+        return None, "归档里没有 .msg"
+    raw = a.read_by_name(name)
+    enc = "cp932"
+    doc = msg.export_document(msg.MsgFile.from_bytes(raw, enc), name, enc)
+    lines = doc.splitlines()
+    pat = re.compile(r"^(\s*\[\d+\.\d+\]\s*\[[^\]]*\]\s+)(.+)$")
+    hit = False
+    for i, ln in enumerate(lines):
+        m = pat.match(ln)
+        if m:
+            lines[i] = m.group(1) + m.group(2) + "\u6c49"   # 追加「汉」：cp932 编不出
+            hit = True
+            break
+    if not hit:
+        return None, "文档里没有可改的行"
+    edited = "\n".join(lines)
+    target = msg.MsgFile.from_bytes(raw, enc)
+    before = [ins.text(enc) for e in target.entries for ins in e.texts()]
+    try:
+        msg.import_document(edited, target, enc, dry_run=False)
+    except msg.MsgError as ex:
+        return False, "拒绝写入（正确）: %s" % str(ex).splitlines()[0]
+    except Exception as ex:
+        return False, "抛的是其它异常: %r" % (ex,)
+    after = [ins.text(enc) for e in target.entries for ins in e.texts()]
+    wrote_q = any("?" in t for t in after)
+    untouched = before == after
+    return (wrote_q or not untouched), \
+        ("未报错；写入后出现 '?' = %s，文件被改动 = %s" % (wrote_q, not untouched))
+
+
+claim("编不出来的字符被静默替换成 ? 并写入", True, c_msg_badchar)
 
 # ---------------------------------------------------------------- P0-4
 print("\n### P0-4 无法编码的字符是否被静默替换成 ?")

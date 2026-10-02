@@ -184,11 +184,27 @@ class Instruction(object):
         raw = raw.split(b"\0", 1)[0]
         return raw.decode(encoding, "replace")
 
-    def set_text(self, text, encoding="cp932"):
-        """写入文本指令（自动补零到 4 字节对齐，与 thtk 写回逻辑一致）。"""
+    def set_text(self, text, encoding="cp932", strict=True):
+        """写入文本指令（自动补零到 4 字节对齐，与 thtk 写回逻辑一致）。
+
+        :param strict: 为真（默认）时，正文里有目标编码表示不了的字符就抛
+            ``MsgError``。以前这里是 ``encode(encoding, "replace")``，
+            会把无法编码的字符**静默变成 ``?``** 并照常写盘 ——
+            翻译场景下（日文版写简体字等）等于悄悄吃掉用户的内容。
+            需要「预览/统计坏字符」时传 ``strict=False``。
+        """
         if not self.is_text:
             raise MsgError("不是文本指令")
-        raw = text.encode(encoding, "replace")
+        try:
+            raw = text.encode(encoding, "strict")
+        except UnicodeEncodeError as ex:
+            bad = text[ex.start:ex.end]
+            if strict:
+                raise MsgError(
+                    "这行有 %s 编码表示不了的字符：%r\n"
+                    "（第 %d 个字符起）请改成 %s 里能显示的写法，"
+                    "或者把该字符删掉。" % (encoding, bad, ex.start + 1, encoding))
+            raw = text.encode(encoding, "replace")
         raw += b"\0" * (4 - (len(raw) % 4))
         self.data = rolling_xor(raw)
 
@@ -353,10 +369,35 @@ def guess_encoding(data):
 # 对话文档（导出 / 导入）
 # ----------------------------------------------------------------------
 #: 文档里每行的格式：  [条目号.指令号] [说话人] 文本
-#: 第二个方括号内容不固定（可能是 自机/敌机/旁白，也可能是角色名），
-#: 导入时只有命中已知说话人标签才会被剥离。
-DOC_LINE_RE = re.compile(
-    r"^\s*\[(\d+)\.(\d+)\]\s*(?:\[([^\]]*)\])?\s?(.*)$")
+#:
+#: 早先用「可选标签组 + `(.*)`」有两个坑：
+#:
+#: 1. 正文是 `(.*)`，允许空 → 「[0.1] [自机]」（正文被删掉）会被当成
+#:    「把这句话改成空文本」，**静默清空对话**。
+#: 2. 就算把正文改成「必须含非空白」，可选标签组还是会被正则回溯跳过，
+#:    于是 `[自机] ` 整个落进正文组（实测 groups = ('0','6',None,'[自机] ')）。
+#:
+#: 现在按顺序试两个**互斥**模式，标签模式要求「标签后必须是空白」，
+#: 无标签模式则明确排除「后面紧跟已知标签」的行：
+#:
+#: * ``_DOC_LINE_LABELED``：`[0.1] [自机] 文本`
+#: * ``_DOC_LINE_PLAIN``：  `[0.1] 文本`（导出文档里写了标签删掉也不影响）
+#:
+#: 两个互斥很关键：只靠「正文必须含非空白」挡不住 `[0.1] [自机]`，
+#: 因为无标签模式会把 `[自机]` 当成正文（它确实含非空白字符）。
+_DOC_LINE_LABELED = r"^\s*\[(\d+)\.(\d+)\]\s*\[(?:%s)\]\s+(\S.*)$"
+_DOC_LINE_PLAIN = r"^\s*\[(\d+)\.(\d+)\]\s+(?!\s*\[(?:%s)\])(\S.*)$"
+
+
+def doc_line_re(encoding="cp932", labels=None):
+    """返回 ``(带标签的正则, 不带标签的正则)``，按顺序尝试、两者互斥。"""
+    if labels is None:
+        labels = _label_set()
+    alt = "|".join(re.escape(x) for x in sorted(labels) if x)
+    if not alt:
+        return None, re.compile(r"^\s*\[(\d+)\.(\d+)\]\s+(\S.*)$")
+    return (re.compile(_DOC_LINE_LABELED % alt),
+            re.compile(_DOC_LINE_PLAIN % alt))
 
 
 def export_document(msgfile, filename, encoding=None):
@@ -404,6 +445,7 @@ def import_document(text, msgfile, encoding=None, dry_run=False):
     """
     encoding = encoding or msgfile.encoding
     labels = _label_set()
+    labeled_re, plain_re = doc_line_re(encoding, labels)
     changed = 0
     unmatched = []
     bad_chars = []
@@ -412,15 +454,14 @@ def import_document(text, msgfile, encoding=None, dry_run=False):
         line = raw.rstrip("\r\n")
         if not line.strip() or line.lstrip().startswith("#"):
             continue
-        m = DOC_LINE_RE.match(line)
+        m = labeled_re.match(line) if labeled_re else None
+        if not m:
+            m = plain_re.match(line)
         if not m:
             unmatched.append(line)
             continue
         ei, ji = int(m.group(1)), int(m.group(2))
-        new_text = m.group(4)
-        # 第二个方括号只有确实是说话人标签时才剥离
-        if m.group(3) is not None and m.group(3) not in labels:
-            new_text = "[%s] %s" % (m.group(3), new_text)
+        new_text = m.group(3)
         if ei >= len(msgfile.entries):
             unmatched.append(line)
             continue
@@ -439,6 +480,16 @@ def import_document(text, msgfile, encoding=None, dry_run=False):
                 if ch not in bad_chars:
                     bad_chars.append(ch)
             if not dry_run:
+                if bad_chars:
+                    # 有编不出来的字符就**不要动文件**：以前是 encode(..., "replace")
+                    # 直接写 ?，用户看到「导入成功」但内容已被悄悄改坏。
+                    raise MsgError(
+                        "有 %d 个字符无法用 %s 表示：%s\n"
+                        "已放弃写入，游戏文件没有被改动。\n"
+                        "请把这些字符改成 %s 里能显示的写法（或删掉）后重新导入。"
+                        % (len(bad_chars), encoding,
+                           " ".join(repr(c) for c in bad_chars[:8]),
+                           encoding))
                 ins.set_text(new_text, encoding)
             changed += 1
     return changed, unmatched, bad_chars, changes
