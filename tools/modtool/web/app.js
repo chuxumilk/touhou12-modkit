@@ -710,11 +710,13 @@ function renderBgm() {
       ? `<span class="pill warn">已暂存替换 · ${fmtDuration(t.duration)}</span>`
       : '<span class="pill">原始</span>';
     const cap = t.max_loop_seconds || t.duration || 0;
-    // 循环点 = 引子长度。保存时把这段复制到末尾，游戏整块循环播放，
-    // 于是引子只播一次、之后一直在循环点处循环。
+    // 循环点 = 从这里开始循环。保存时把「循环点之后的部分」重复两遍
+    // 作为整条轨道，引擎整块循环播放，于是从第一秒起就在循环。
     const loopHint = t.pending_loop != null
       ? `<br><span class="muted" style="font-size:11px">待保存 · 保存后 `
-        + `总长 ${(t.duration_after || t.duration).toFixed(1)} 秒`
+        + `只剩后 ${(Math.max(0, (t.duration || 0)
+          - (t.pending_loop / 176400))).toFixed(1)} 秒在循环`
+        + `（轨道 ${(t.duration_after || t.duration).toFixed(1)} 秒）`
         + (t.orig_loop_seconds != null && t.orig_loop_seconds > 0
           ? `，原 ${t.orig_loop_seconds.toFixed(1)} 秒` : "")
         + `</span>`
@@ -868,15 +870,16 @@ function updateWaveSide() {
   $("#bgm-total").textContent = fmtSec(WAVE.sec);
   $("#bgm-loop-show").textContent = (WAVE.loopBytes / 176400).toFixed(2);
   const note = $("#bgm-loop-note");
-  // 这里显示的是「保存后会变成什么」。th12.exe 只把音频整块循环播放，
-  // 不认 thbgm.fmt 里的循环点字段，所以保存时会把 [0,循环点) 复制到末尾：
-  // 播放序列变成 引子 → 循环体 → 引子 →（一直循环循环体）。
-  // 想改成别的位置就得重新保存，每个位置都会重算拼接。
+  // 这里显示保存后会变成什么。th12.exe 只把音频整块循环播放、不认循环点
+  // 字段，所以保存时会把「循环点之后的部分」重复两遍作为整条轨道：
+  //   新轨道 = [循环点→曲尾][循环点→曲尾]，长度 = 2 × 该部分
+  // 于是从第一秒起就是循环，不存在「引子播一遍」的阶段。
   if (WAVE.pending) {
-    const intro = WAVE.loopBytes / 176400;
-    note.textContent = intro > 0
-      ? `（未保存）保存后总长 ${(WAVE.sec + intro).toFixed(1)} 秒：`
-        + `前 ${intro.toFixed(1)} 秒是引子，之后一直在 ${intro.toFixed(1)} 秒处循环`
+    const at = WAVE.loopBytes / 176400;
+    const body = Math.max(0, WAVE.sec - at);
+    note.textContent = at > 0
+      ? `（未保存）保存后：丢弃前 ${at.toFixed(1)} 秒，`
+        + `整条轨道变成那 ${body.toFixed(1)} 秒循环`
       : "（未保存）保存后整首循环";
   } else if (WAVE.loopBytes === 0) {
     note.textContent = "（整首循环）";

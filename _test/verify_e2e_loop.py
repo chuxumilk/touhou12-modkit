@@ -104,7 +104,12 @@ def main():
           % (idx, name, old_loop, target["loop_seconds"], target["size"]))
     NEW_SEC = 12.5
     new_loop = int(NEW_SEC * B.BYTES_PER_SEC) // 4 * 4
-    print("\n[3] 设置循环点 -> %.2fs (%d 字节)" % (NEW_SEC, new_loop))
+    # 这一轮拼接的源长度就是这条曲目当前的音频长度；
+    # 保存后 loop 字段会等于「源长 − 设定值」（= 循环体长度）
+    src_len = target["size"]
+    want_loop = src_len - new_loop
+    print("\n[3] 设置循环点 -> %.2fs (%d 字节)；源长 %d，预期循环体 %d"
+          % (NEW_SEC, new_loop, src_len, want_loop))
     r = server.bgm_set_loop(idx, new_loop)
     print("  bgm_set_loop -> %s" % r)
     check(r.get("ok"), "bgm_set_loop 返回 ok")
@@ -136,8 +141,12 @@ def main():
         print("  %s: %s loop=%d (%.2fs) preload=%d end=%d"
               % (base, t.name, t.loop, t.loop / float(B.BYTES_PER_SEC),
                  t.preload, t.end))
-        check(t.loop == new_loop, "%s 里循环点已更新" % base,
-              "期望 %d，实际 %d" % (new_loop, t.loop))
+        # 新设计：轨道内容 = [循环体][循环体]，loop 字段 = 循环体长度
+        #         = 源音频长度 − 用户设的循环点
+        check(t.loop == want_loop, "%s 里循环点 = 源长 − 设定值" % base,
+              "期望 %d，实际 %d" % (want_loop, t.loop))
+        check(t.end == 2 * want_loop, "%s 里长度 = 2 × 循环体" % base,
+              "期望 %d，实际 %d" % (2 * want_loop, t.end))
         check(raw1 != raw0, "%s 里 thbgm.fmt 内容确实变了" % base)
 
     # ---- 独立的 thbgm.fmt 文件（如果游戏用外置的）----
@@ -145,7 +154,7 @@ def main():
     if os.path.isfile(loose):
         f = B.BgmFmt.from_file(loose)
         print("  外置 thbgm.fmt: loop=%d" % f.tracks[idx].loop)
-        check(f.tracks[idx].loop == new_loop, "外置 thbgm.fmt 同步更新")
+        check(f.tracks[idx].loop == want_loop, "外置 thbgm.fmt 同步更新")
 
     # ---- 检查 thbgm.dat 里循环点处的数据是否真的可循环 ----
     print("\n[6] thbgm.dat 里循环区间是否有效")

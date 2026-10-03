@@ -106,11 +106,12 @@ def main():
     print("  落盘: name=%s loop=%d (%.2fs) preload=%d end=%d"
           % (t.name, t.loop, t.loop / float(B.BYTES_PER_SEC),
              t.preload, t.end))
-    check(t.loop == loop_a, "场景A 循环点保留", "期望 %d 实际 %d" % (loop_a, t.loop))
-    # 拼接：新音频（40 秒）+ 引子（10 秒）
-    check(t.end == int(40.0 * B.BYTES_PER_SEC) + loop_a,
-          "场景A 音频 = 新音频 + 引子",
-          "%d vs %d" % (t.end, int(40.0 * B.BYTES_PER_SEC) + loop_a))
+    check(t.loop == int(40.0 * B.BYTES_PER_SEC) - loop_a,
+          "场景A 循环点字段 = 循环体长度",
+          "期望 %d 实际 %d" % (int(40.0 * B.BYTES_PER_SEC) - loop_a, t.loop))
+    check(t.end == 2 * (int(40.0 * B.BYTES_PER_SEC) - loop_a),
+          "场景A 音频 = 2 × 循环体",
+          "%d vs %d" % (t.end, 2 * (int(40.0 * B.BYTES_PER_SEC) - loop_a)))
 
     # ---------- 场景 B：循环点超出新长度，应被【拒绝】而不是静默清零 ----------
     print("\n" + "=" * 64)

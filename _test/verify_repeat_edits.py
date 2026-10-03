@@ -109,17 +109,19 @@ def main():
         fmt = read_fmt(dat)
         t = fmt.tracks[idx]
         pcm = read_pcm(data, t)
-        want = orig_len + lb
+        body = orig_pcm[lb:]                 # 循环体 = 原始音频去掉前奏
+        want = 2 * len(body)
         ok_len = len(pcm) == want
-        # 内容必须等于「原始音频按本次循环点重拼」
-        want_pcm = orig_pcm[:lb] + orig_pcm[lb:] + orig_pcm[:lb]
+        # 内容必须等于「循环体重复两遍」，且源始终是原始音频（不叠加）
+        want_pcm = body + body
         ok_content = pcm == want_pcm
-        print("    第%d次 %.2fs -> %d 字节 (期望 %d) loop=%d"
-              % (k + 1, sec, len(pcm), want, t.loop))
-        check(ok_len, "第%d次 长度 = 原长 + 引子" % (k + 1),
+        print("    第%d次 %.2fs -> %d 字节 (期望 %d = 2×循环体 %d) loop=%d"
+              % (k + 1, sec, len(pcm), want, len(body), t.loop))
+        check(ok_len, "第%d次 长度 = 2 × 循环体" % (k + 1),
               "%d vs %d" % (len(pcm), want))
-        check(ok_content, "第%d次 内容 = 原始音频重拼" % (k + 1))
-        check(t.loop == lb, "第%d次 fmt 里 loop 正确" % (k + 1))
+        check(ok_content, "第%d次 内容 = 原始音频重拼（没叠加）" % (k + 1))
+        check(t.loop == len(body), "第%d次 loop = 循环体长度" % (k + 1),
+              "%d vs %d" % (t.loop, len(body)))
         check(t.preload >= len(pcm), "第%d次 preload 覆盖整条" % (k + 1))
 
     # ---------------- 2) 替换 → 改循环点 → 再替换 → 再改 ----------------
@@ -127,18 +129,19 @@ def main():
     w1 = make_wav(os.path.join(work, "a.wav"), 30.0, 300)
     with open(w1, "rb") as f:
         r = server.bgm_replace(idx, f.read())
+    n1 = int(30.0 * BPS)
     server.bgm_set_loop(idx, int(6.0 * BPS) // 4 * 4)
     res = server.save_all("交叉1")
     check(res.get("ok") and not res.get("errors"), "交叉1 保存成功",
           str(res.get("errors")))
     fmt = read_fmt(dat)
     t = fmt.tracks[idx]
-    n1 = int(30.0 * BPS)
-    print("    替换 30s + 引子 6s -> %d 字节 (期望 %d)"
-          % (t.end, n1 + int(6.0 * BPS)))
-    check(abs(t.end - (n1 + int(6.0 * BPS))) < 44100,
-          "替换后长度 = 新音频 + 引子", "%d" % t.end)
-    check(t.loop == int(6.0 * BPS), "循环点 = 6 秒")
+    print("    替换 30s，循环点 6s -> %d 字节 (期望 %d = 2×24s)"
+          % (t.end, 2 * (n1 - int(6.0 * BPS))))
+    check(abs(t.end - 2 * (n1 - int(6.0 * BPS))) < 44100,
+          "长度 = 2 × (新音频 30s − 循环点 6s)", "%d" % t.end)
+    check(t.loop == n1 - int(6.0 * BPS), "loop = 循环体 24 秒",
+          "%d" % t.loop)
 
     # 再替换（更短），之前的拼接结果不能残留
     w2 = make_wav(os.path.join(work, "b.wav"), 15.0, 700)
@@ -151,10 +154,10 @@ def main():
     fmt = read_fmt(dat)
     t = fmt.tracks[idx]
     n2 = int(15.0 * BPS)
-    print("    再替换 15s + 引子 4s -> %d 字节 (期望 %d)"
-          % (t.end, n2 + int(4.0 * BPS)))
-    check(abs(t.end - (n2 + int(4.0 * BPS))) < 44100,
-          "二次替换后长度 = 新音频 + 新引子（无残留）", "%d" % t.end)
+    print("    再替换 15s，循环点 4s -> %d 字节 (期望 %d = 2×11s)"
+          % (t.end, 2 * (n2 - int(4.0 * BPS))))
+    check(abs(t.end - 2 * (n2 - int(4.0 * BPS))) < 44100,
+          "二次替换后长度 = 2 ×（新音频 − 新循环点），无残留", "%d" % t.end)
 
     # ---------------- 3) 放弃暂存后重新改 ----------------
     print("\n[3] 改循环点 → 放弃暂存 → 重新改（放弃后必须干净）")
@@ -164,19 +167,18 @@ def main():
     server.bgm_cancel()
     pend2 = server.list_pending()
     check(pend2["count"] == 0, "放弃后待保存清零", str(pend2["count"]))
-    # 放弃后重新设一个并保存，长度基准必须还是「当前盘上的音频」
-    fmt_before = read_fmt(dat)
-    cur_len = fmt_before.tracks[idx].end
+    # 放弃后重新设一个并保存：基准是「盘上当前的音频」（也就是放弃时那份）
+    cur_len = read_fmt(dat).tracks[idx].end
     server.bgm_set_loop(idx, int(2.0 * BPS) // 4 * 4)
     res = server.save_all("放弃后重设")
     fmt = read_fmt(dat)
     t = fmt.tracks[idx]
-    print("    放弃后重设 2s -> %d 字节 (期望 %d + %d)"
-          % (t.end, cur_len, int(2.0 * BPS)))
+    want3 = 2 * (cur_len - int(2.0 * BPS))
+    print("    放弃后重设 2s -> %d 字节 (期望 %d = 2×(%d−2s))"
+          % (t.end, want3, cur_len))
     check(res.get("ok"), "放弃后重设保存成功", str(res.get("errors")))
-    check(t.end == cur_len + int(2.0 * BPS),
-          "长度 = 放弃时盘上长度 + 新引子",
-          "%d vs %d" % (t.end, cur_len + int(2.0 * BPS)))
+    check(t.end == want3, "长度按放弃时盘上音频重算",
+          "%d vs %d" % (t.end, want3))
 
     # ---------------- 4) 暂存态反复覆盖 ----------------
     print("\n[4] 不保存，连改 6 次（只有最后一次生效）")
@@ -192,11 +194,14 @@ def main():
     res = server.save_all("只留最后一次")
     fmt = read_fmt(dat)
     t = fmt.tracks[idx]
+    want4 = 2 * (base - int(10.0 * BPS))
+    want_loop4 = base - int(10.0 * BPS)
     print("    连改 6 次后保存 -> loop=%d (期望 %d) len=%d (期望 %d)"
-          % (t.loop, int(10.0 * BPS), t.end, base + int(10.0 * BPS)))
-    check(t.loop == int(10.0 * BPS), "只有最后一次生效", str(t.loop))
-    check(t.end == base + int(10.0 * BPS), "长度按最后一次算",
-          "%d vs %d" % (t.end, base + int(10.0 * BPS)))
+          % (t.loop, want_loop4, t.end, want4))
+    check(t.loop == want_loop4, "只有最后一次生效（loop = 源长 − 10 秒）",
+          "%d vs %d" % (t.loop, want_loop4))
+    check(t.end == want4, "长度按最后一次算",
+          "%d vs %d" % (t.end, want4))
 
     # ---------------- 5) 两个档必须一致 ----------------
     print("\n[5] 日文版/汉化版两个档的 fmt 必须一致")

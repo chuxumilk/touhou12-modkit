@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
 """实测「循环点拼接」是否真的实现了循环。
 
-th12.exe 的 BGM 引擎只读 thbgm.fmt 的 offset 与 preload，把那段音频
-整块循环播放，从不读 +0x18 的 loop 字段。所以「改循环点」是靠改音频实现的：
+th12.exe 的 BGM 引擎只把 offset 起的 total_len 字节读进内存后**整块循环
+播放**，从不读循环点字段（三重取证见 _recon/th12_loop_decisive.py）。
+所以循环点必须靠改音频实现：
 
-    原曲 [引子 L][循环体 B]  ->  拼接成 [引子][循环体][引子]
-                                  0..A    A..2A    2A..2A+L
+    原曲 [前奏 L][循环体 B]  ->  轨道内容 = [循环体][循环体]，循环点写 B
 
-引擎播完 [0, 2A+L) 回到 0 重放，听到的是末尾那份引子，
-它结束处紧接着循环体开头 —— 于是音乐无缝进入第二段并无限循环。
+引擎从缓冲开头整块重放，第一遍播的就是循环体，从头到尾都在循环。
+（早期版本用的是 [引子][循环体][引子]，把循环点当「引子长度」，
+循环点越靠后引子越长、循环感越弱，主观上等同于「没生效」。）
 
 本脚本用真实游戏目录的**副本**验证：
-  1. 保存后 thbgm.dat 里的音频确实等于 [引子][循环体][引子]
-  2. 播放序列（模拟引擎整块循环）确实在循环点处衔接
+  1. 保存后 thbgm.dat 里的音频确实等于 [循环体][循环体]
+  2. 循环点字段 = 循环体长度
   3. 没设循环点的曲目一个字都没被改
 """
 import os
@@ -106,7 +107,7 @@ def main():
 
     L_sec = min(12.0, t0["duration"] * 0.3)
     L = int(L_sec * BPS) // 4 * 4
-    print("\n[1] 设循环点 %.2f 秒（引子长度）" % L_sec)
+    print("\n[1] 设循环点 %.2f 秒" % L_sec)
     r = server.bgm_set_loop(idx, L)
     print("    -> %s" % r)
     check(r.get("ok") and r.get("loop") == L, "接口接受循环点")
@@ -124,42 +125,34 @@ def main():
     fmt_after = read_fmt(os.path.join(game, "th12.dat"))
     t = fmt_after.tracks[idx]
     after = read_track_pcm(os.path.join(game, "thbgm.dat"), t)
-    want_len = A_bytes + L
-    print("    保存后 PCM %d 字节 (%.2f 秒)，期望 %d"
-          % (len(after), len(after) / float(BPS), want_len))
-    check(len(after) == want_len, "长度 = 原长 + 引子",
+    body = before[L:]                        # 循环体
+    want_len = 2 * len(body)
+    print("    保存后 PCM %d 字节 (%.2f 秒)，期望 %d = 2 × 循环体 %d"
+          % (len(after), len(after) / float(BPS), want_len, len(body)))
+    check(len(after) == want_len, "长度 = 2 × 循环体",
           "%d vs %d" % (len(after), want_len))
-    check(t.loop == L, "fmt 里 loop 指向循环体起点",
-          "期望 %d 实际 %d" % (L, t.loop))
+    check(t.loop == len(body), "fmt 里 loop = 循环体长度",
+          "期望 %d 实际 %d" % (len(body), t.loop))
     check(t.preload >= len(after), "preload 覆盖整条（否则循环体被截断）",
           "preload=%d len=%d" % (t.preload, len(after)))
 
-    intro = before[:L]
-    body = before[L:]
-    check(after[:L] == intro, "开头 = 引子")
-    check(after[L:L + len(body)] == body, "中段 = 循环体")
-    check(after[-L:] == intro, "末尾 = 引子（这是循环能接上的关键）")
-    check(after == intro + body + intro, "整段 = 引子+循环体+引子")
+    check(after == body + body, "整段 = [循环体][循环体]")
+    check(after[:len(body)] == body, "前半 = 循环体")
+    check(after[len(body):] == body, "后半 = 循环体（与前半逐字节相同）")
 
-    print("\n[4] 回绕衔接点")
-    # 缓冲总长 = A + L（引子+循环体 = A，再加一份引子）
-    check(len(after) == A_bytes + L, "缓冲总长 = 原长 + 引子")
-    # 引擎播到末尾后回到 0，听到的是末尾那份引子 -> 无缝接回开头
-    check(after[-L:] == after[:L], "末尾引子 == 开头引子，回绕后无缝")
+    print("\n[4] 回绕无缝 + 前奏确实被丢弃")
+    # 引擎播完整块后回到 0，0 处就是循环体开头 —— 与曲尾接得上
+    check(after[:4] == before[L:L + 4],
+          "回绕后播的就是循环体开头（与原曲循环点处一致）")
+    check(after.find(before[:L]) == -1 if L >= 4 else True,
+          "前奏 [0,循环点) 已不在轨道里（所以一进游戏就在循环）")
 
-    print("\n[5] 播放序列：验证「引子播一次，之后一直循环循环体」")
-    # 引擎把 [0, A+L) 整块反复播放，按时间展开就是：
-    #   intro body | intro body | intro body | ...
-    # 把缓冲按 [引子][循环体+引子] 切成两段来核对
-    check(after[:L] == intro, "第 1 段起播 = 引子")
-    check(after[L:] == body + intro, "第 2 段起播 = 循环体 → 引子")
-    check(after[L:L + len(body)] == body, "引子之后完整接出循环体")
-    # 关键性质：循环区 [L, A+L) 内部不再出现「整段引子」，也就是说
-    # 引子只在开头播一次，之后听到的都是循环体
-    check(after[L:] != after, "循环区内容 ≠ 整块（引子没有整段重复）")
-    # 引子结束处接的是循环体开头 —— 与原曲 L 处的接缝完全一致
-    check(after[L:L + 4] == before[L:L + 4],
-          "引子结束处接的是循环体开头（与原始接缝一致）")
+    print("\n[5] 播放序列：全程都是循环体，没有「引子只播一次」的问题")
+    # 引擎整块循环，按时间展开就是 body | body | body …
+    n = len(body)
+    seq = [after[0:n], after[n:2 * n]]
+    check(seq[0] == seq[1] == body, "两遍播的都是循环体")
+    check(len(after) == 2 * n, "轨道恰好装两遍循环体")
 
     print("\n[6] 没设循环点的曲目必须一字未改")
     other_after = read_track_pcm(os.path.join(game, "thbgm.dat"),
@@ -177,17 +170,17 @@ def main():
     fmt3 = read_fmt(os.path.join(game, "th12.dat"))
     t3 = fmt3.tracks[idx]
     after3 = read_track_pcm(os.path.join(game, "thbgm.dat"), t3)
-    # 关键：源永远是「未拼接的原始音频」，所以结果 = 原长 + 新引子，
-    # 而不是 上一次结果 + 新引子。
-    want3 = A_bytes + L2
-    print("    新循环点 %.2f 秒 -> PCM %d 字节（期望 %d = 原长 %d + 新引子 %d）"
-          % (L2 / float(BPS), len(after3), want3, A_bytes, L2))
-    check(len(after3) == want3, "长度 = 原长 + 新引子（没有叠加）",
+    # 关键：源永远是「未拼接的原始音频」，所以结果 = 2 × (原长 − 新循环点)，
+    # 而不是在上一次结果上再拼。
+    body2 = before[L2:]
+    want3 = 2 * len(body2)
+    print("    新循环点 %.2f 秒 -> PCM %d 字节（期望 %d = 2 × 循环体 %d）"
+          % (L2 / float(BPS), len(after3), want3, len(body2)))
+    check(len(after3) == want3, "长度 = 2 × 新循环体（没有叠加）",
           "%d vs %d" % (len(after3), want3))
-    check(t3.loop == L2, "新 loop 字段生效")
-    check(after3[:L2] == before[:L2], "新引子取自原始音频的开头")
-    check(after3 == before[:L2] + before[L2:] + before[:L2],
-          "整段 = 原始音频按新循环点重拼")
+    check(t3.loop == len(body2), "新 loop 字段 = 新循环体长度",
+          "%d vs %d" % (t3.loop, len(body2)))
+    check(after3 == body2 + body2, "整段 = 原始音频按新循环点重拼")
 
     print("\n[8] 再改第三次，确认始终以原始音频为源")
     L3 = int(20.0 * BPS) // 4 * 4
@@ -196,12 +189,12 @@ def main():
     fmt4 = read_fmt(os.path.join(game, "th12.dat"))
     t4 = fmt4.tracks[idx]
     after4 = read_track_pcm(os.path.join(game, "thbgm.dat"), t4)
+    body3 = before[L3:]
     print("    第三次循环点 %.2f 秒 -> PCM %d 字节（期望 %d）"
-          % (L3 / float(BPS), len(after4), A_bytes + L3))
-    check(len(after4) == A_bytes + L3, "第三次仍是原长 + 引子",
-          "%d vs %d" % (len(after4), A_bytes + L3))
-    check(after4 == before[:L3] + before[L3:] + before[:L3],
-          "内容 = 原始音频按第三次循环点重拼")
+          % (L3 / float(BPS), len(after4), 2 * len(body3)))
+    check(len(after4) == 2 * len(body3), "第三次仍是 2 × 循环体",
+          "%d vs %d" % (len(after4), 2 * len(body3)))
+    check(after4 == body3 + body3, "内容 = 原始音频按第三次循环点重拼")
 
     print("\n" + "=" * 62)
     print("%d 项检查，%d 失败" % (checks[0], len(fails)))

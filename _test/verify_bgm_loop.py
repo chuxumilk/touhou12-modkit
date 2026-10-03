@@ -129,23 +129,39 @@ check("接口反映出新循环点",
                                            t0b.get("pending_loop")))
 
 print("\n⑤ 保存到游戏（会重建 thbgm.dat + 写回 thbgm.fmt）")
+# 先记下这一轮的「源音频长度」：保存后 track.loop 会等于 源长 − 循环点
+src_len = None
+code, bgm_pre = jcall("GET", "/api/bgm")
+if code == 200 and bgm_pre.get("tracks"):
+    src_len = bgm_pre["tracks"][0].get("size")
+print("   本轮源音频长度 = %s 字节（%.2f 秒）"
+      % (src_len, (src_len or 0) / float(BYTES_PER_SEC)))
 code, saved = jcall("POST", "/api/save", {"comment": "bgm-loop-test"})
 check("保存返回成功", code == 200 and saved.get("ok") is not False,
       "bgm=%s files=%s errors=%s" % (saved.get("bgm"), saved.get("files"),
                                      saved.get("errors")))
 
-print("\n⑥ 从磁盘读回 thbgm.fmt，检查循环点")
+print("\n⑥ 从磁盘读回 thbgm.fmt，检查音频与循环点")
 from thtk import archive, bgm as bgmmod  # noqa: E402
 
 a = archive.Archive.from_file(os.path.join(tmp, "th12.dat"))
 raw = a.read_by_name("thbgm.fmt")
 fmt = bgmmod.BgmFmt.from_bytes(raw)
 tr = fmt.tracks[0]
+# 新设计：轨道内容 = [循环体][循环体]，循环点字段 = 循环体长度
+#         循环体 = 源音频[循环点 : 源尾]
+want_body = (src_len - TARGET_BYTES) if src_len else None
 print("   磁盘上: %s offset=%d loop=%d end=%d"
       % (tr.name, tr.offset, tr.loop, tr.end))
-print("   期望  : loop=%d（%.2f 秒）" % (TARGET_BYTES, TARGET_SEC))
-check("磁盘上的循环点 == 设定值", tr.loop == TARGET_BYTES,
-      "实际 %d（%.2f 秒）" % (tr.loop, tr.loop / float(BYTES_PER_SEC)))
+if want_body:
+    print("   期望  : loop=%d（循环体 %.2f 秒）end=%d（2 × 循环体）"
+          % (want_body, want_body / float(BYTES_PER_SEC), 2 * want_body))
+check("磁盘上的循环点 == 源长 − 设定值（即循环体长度）",
+      want_body is not None and tr.loop == want_body,
+      "实际 %d vs 期望 %s" % (tr.loop, want_body))
+check("轨道长度 = 2 × 循环体（整条轨道就是循环体重复两遍）",
+      want_body is not None and tr.end == 2 * want_body,
+      "实际 %d vs 期望 %s" % (tr.end, 2 * want_body if want_body else None))
 check("循环点在轨道长度之内（否则游戏无法循环）",
       0 < tr.loop < tr.end, "loop=%d end=%d" % (tr.loop, tr.end))
 
@@ -166,6 +182,12 @@ badloop = [(t.name, t.loop, t.end) for t in fmt.tracks if t.loop > t.end]
 check("所有循环点都不超过轨道长度", not badloop, str(badloop[:3]))
 
 print("\n⑧ 只改循环点（不替换曲目）也应生效")
+# 这一轮要替换的是曲目 1：先读它的当前长度（= 拼接源），
+# 保存后它同样会变成 [循环体][循环体]
+code, bgm_pre2 = jcall("GET", "/api/bgm")
+src1 = None
+if code == 200 and len(bgm_pre2.get("tracks") or []) > 1:
+    src1 = bgm_pre2["tracks"][1].get("size")
 code, r = jcall("POST", "/api/bgm.loop?index=1&loop=%d" % (5 * BYTES_PER_SEC))
 check("设置曲目 1 的循环点", code == 200, str(r)[:60])
 code, saved2 = jcall("POST", "/api/save", {"comment": "loop-only"})
@@ -174,8 +196,14 @@ check("保存成功", code == 200 and saved2.get("ok") is not False,
 a2 = archive.Archive.from_file(os.path.join(tmp, "th12.dat"))
 fmt2 = bgmmod.BgmFmt.from_bytes(a2.read_by_name("thbgm.fmt"))
 tr1 = fmt2.tracks[1]
-check("曲目 1 的循环点已写入磁盘", tr1.loop == 5 * BYTES_PER_SEC,
-      "实际 %d（%.2f 秒）" % (tr1.loop, tr1.loop / float(BYTES_PER_SEC)))
+want1 = (src1 - 5 * BYTES_PER_SEC) if src1 else None
+print("   曲目1: loop=%d end=%d（期望 loop=%s end=%s）"
+      % (tr1.loop, tr1.end, want1, 2 * want1 if want1 else None))
+check("曲目 1 的循环点 = 源长 − 5 秒", want1 is not None and tr1.loop == want1,
+      "实际 %d vs 期望 %s" % (tr1.loop, want1))
+check("曲目 1 的轨道长度 = 2 × 循环体",
+      want1 is not None and tr1.end == 2 * want1,
+      "实际 %d vs 期望 %s" % (tr1.end, 2 * want1 if want1 else None))
 
 print("\n" + "=" * 78)
 print("通过 %d 项，失败 %d 项" % (len(PASS), len(FAIL)))

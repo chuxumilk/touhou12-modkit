@@ -138,12 +138,14 @@ fmt = bgmmod.BgmFmt.from_bytes(a.read_by_name("thbgm.fmt"))
 tr = fmt.tracks[0]
 print("   磁盘: loop=%d（%.2f 秒）end=%d（%.2f 秒）"
       % (tr.loop, tr.loop / float(BPS), tr.end, tr.end / float(BPS)))
-# 保存时会把 [0,循环点) 这份「引子」复制到末尾，所以最终长度 = 新音频 + 引子。
-# 这是循环点真正生效的机制（引擎不读 thbgm.fmt 的 loop 字段）。
-check("轨道长度 = 新音频长度 + 引子长度", tr.end == n20 + good_bytes,
-      "%d vs %d(新音频)+%d(引子)" % (tr.end, n20, good_bytes))
-check("★ 循环点写进磁盘 = 12 秒", tr.loop == good_bytes,
-      "实际 %.2f 秒" % (tr.loop / float(BPS)))
+# 保存时会把「循环点之后的那一段」重复两遍作为整条轨道，所以
+# 最终长度 = 2 × (新音频 − 循环点)。这是循环点真正生效的机制
+# （引擎不读 thbgm.fmt 的 loop 字段，只把整块音频循环播放）。
+body = n20 - good_bytes
+check("轨道长度 = 2 × (新音频 − 循环点)", tr.end == 2 * body,
+      "%d vs 2×(%d-%d)=%d" % (tr.end, n20, good_bytes, 2 * body))
+check("★ 循环点字段 = 循环体长度", tr.loop == body,
+      "实际 %.2f 秒，期望 %.2f 秒" % (tr.loop / float(BPS), body / float(BPS)))
 check("preload 覆盖整条（否则循环体会被截断）", tr.preload >= tr.end,
       "preload=%d end=%d" % (tr.preload, tr.end))
 
@@ -191,18 +193,19 @@ check("保存成功", code == 200 and saved.get("ok") is not False,
 a = archive.Archive.from_file(os.path.join(tmp, "th12.dat"))
 fmt = bgmmod.BgmFmt.from_bytes(a.read_by_name("thbgm.fmt"))
 t2, t3 = fmt.tracks[2], fmt.tracks[3]
-print("   曲目2: end=%d loop=%d（新音频 10 秒 + 引子 3 秒）" % (t2.end, t2.loop))
-print("   曲目3: end=%d loop=%d（原曲 + 引子 4 秒）" % (t3.end, t3.loop))
-check("曲目2 长度 = 新音频 10 秒 + 引子 3 秒",
-      t2.end == int(10.0 * BPS) + int(3.0 * BPS),
-      "%d vs %d" % (t2.end, int(13.0 * BPS)))
-check("曲目2 循环点 = 3 秒", t2.loop == int(3.0 * BPS),
+b2 = int(10.0 * BPS) - int(3.0 * BPS)        # 曲目2：新音频 10 秒，循环点 3 秒
+print("   曲目2: end=%d loop=%d（新音频 10 秒，循环体 7 秒）" % (t2.end, t2.loop))
+print("   曲目3: end=%d loop=%d（只改循环点）" % (t3.end, t3.loop))
+check("曲目2 长度 = 2 × 循环体 7 秒", t2.end == 2 * b2,
+      "%d vs %d" % (t2.end, 2 * b2))
+check("曲目2 循环点字段 = 循环体 7 秒", t2.loop == b2,
       "实际 %.2f 秒" % (t2.loop / float(BPS)))
-check("曲目3 循环点 = 4 秒", t3.loop == int(4.0 * BPS),
-      "实际 %.2f 秒" % (t3.loop / float(BPS)))
-# 曲目3 只设了循环点（没替换音频），也一样要拼接并把 preload 撑到覆盖整条
+check("曲目3 循环点字段 = 循环体长度（原曲长 − 4 秒）",
+      t3.loop == t3.end // 2,
+      "loop=%d end=%d" % (t3.loop, t3.end))
+# 曲目3 只设了循环点（没替换音频），也一样要重拼并把 preload 撑到覆盖整条
 check("只改循环点的曲目也做了拼接且 preload 覆盖整条",
-      t3.end > int(4.0 * BPS) and t3.preload >= t3.end,
+      t3.end > 0 and t3.preload >= t3.end,
       "end=%d preload=%d" % (t3.end, t3.preload))
 
 print("\n" + "=" * 78)

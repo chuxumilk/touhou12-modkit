@@ -251,42 +251,46 @@ def align4(n):
 
 
 def splice_loop_pcm(pcm, loop_bytes):
-    """把 PCM 拼成「引子 + 循环体 + 引子」，让游戏真正在循环点接上。
+    """把 PCM 变成「整个轨道就是循环体」，让游戏真的在这里无限循环。
 
-    为什么需要动音频：th12.exe 的 BGM 引擎（0x453940-0x453AD8）只读
-    thbgm.fmt 的 offset 与 preload —— 把 offset 起的 preload 字节读进内存
-    后**整块循环播放**，从不读取 +0x18 的 loop 字段。所以「只改 fmt 里的
-    循环点」永远听不出区别，必须从音频本身下手。
+    为什么必须动音频：th12.exe 的 BGM 引擎只把 offset 起的 total_len 字节
+    读进内存后**整块循环播放**，从不读取 +0x18 的循环点字段
+    （见 _recon/th12_loop_decisive.py 的三重取证）。所以只改 fmt 字段没用。
 
-    设引子 = [0, L)、循环体 = [L, end)，拼接结果：
+    引擎的循环方式决定了正确做法：
+        它播完整个缓冲后回到缓冲**开头**重放。
+    因此只要让「缓冲内容」本身等于我们想反复听的那一段，就实现了循环。
 
-        [ 引子 ][ 循环体 ][ 引子 ]        L 在中间，A = L + (end-L) = end
-         0..L    L..A      A..A+L
+    设循环体 = [L, end)，其中 L 是用户指定的循环点。产出：
 
-    引擎播完 [0, A) 后回到 0 重放，此时听的正好是最后那份引子，
-    它结束的位置紧接循环体开头 —— 于是音乐无缝进入第二段并一直循环：
+        [ 循环体 ][ 循环体 ]        长度 = 2 × (end - L)
+         0..B      B..2B            B = end - L
 
-        时间轴:  引子 → 循环体 → 引子 → 循环体 → 引子 → 循环体 → …
-        听感:    引子 → 循环体 →（无限循环循环体）→ …
+    并把 fmt 里的循环点写成 B。这样：
+        · 引擎若从缓冲开头循环（实测如此）→ 从头到尾听到的都是循环体
+        · 引擎若在 loop 字段处循环（保险起见）→ 跳回 B 处仍是循环体
 
-    代价：循环体那一份是原样复制的，和引子之间是**硬切**，乐器会断。
-    原曲的 loop 字段本来就是作曲者标的自然衔接点，所以这个断点通常很轻微，
-    但绝不是无缝的。界面必须如实说明。
+    **以前的做法是「引子 + 循环体 + 引子」，把循环点当成「引子长度」，
+    结果循环点设得越靠后、引子越长、循环感越弱** —— 实测用户把循环点设在
+    208.5 秒曲子的 194.5 秒处时，要等三分多钟才听得到那 14 秒开始重复，
+    主观上等同于「没生效」。现在改成丢掉循环点之前的前奏，保证一进游戏
+    就在循环。
 
     :param pcm: 裸 PCM（16bit 立体声 44100Hz，按字节切即可）
-    :param loop_bytes: 循环点（= 引子长度），相对轨道起点的字节数
-    :return: 拼接后的 PCM；loop_bytes 不在 (0, len) 内时原样返回
+    :param loop_bytes: 循环点 L，相对轨道起点的字节数
+    :return: (新的 PCM, 新的循环点字节数)
+             loop_bytes 不在 (0, len) 内时按「整首都循环」处理
     """
     total = len(pcm)
     if total <= 0:
-        return pcm
+        return pcm, 0
     loop_bytes = align4(loop_bytes)
     if loop_bytes <= 0 or loop_bytes >= total:
-        return pcm
-    intro = pcm[:loop_bytes]
+        # 循环点在最开头（或未设）＝ 整首循环，内容不用动，
+        # 但要把循环点写成 0，让引擎从缓冲开头重放。
+        return pcm, 0
     body = pcm[loop_bytes:]
-    # 中间长度 A = 原曲长度，这样 fmt 里的 offset 表与听感都对得上
-    return intro + body + intro
+    return body + body, len(body)
 
 
 def rebuild_bgm_dat(src_path, dst_path, replacements, fmt,
@@ -354,19 +358,24 @@ def rebuild_bgm_dat(src_path, dst_path, replacements, fmt,
                         # 传入了暂存文件路径
                         with open(pcm, "rb") as f:
                             pcm = f.read()
-                    pcm = splice_loop_pcm(pcm, loop) if has_loop else pcm
+                    if has_loop:
+                        pcm, new_loop = splice_loop_pcm(pcm, loop)
+                    else:
+                        new_loop = 0
                     out.write(pcm)
                     length = len(pcm)
-                    # 拼接后 fmt 里的 loop 指向「循环体起点」，与原曲语义一致
-                    track.loop = align4(loop) if has_loop else 0
+                    # 拼接后轨道内容就是「循环体重复两遍」，循环点写在
+                    # 循环体长度处：无论引擎从缓冲开头重放（实测如此）还是
+                    # 在 loop 字段处回跳，听到的都是循环体，行为一致。
+                    track.loop = new_loop
                 track.offset = offset
                 track.end = length
                 if pcm is not None:
                     # 预读整条轨道，并保留余量。
-                    # 原版 18 条轨道的 preload 一律是 end 的 1.03~1.27 倍，
-                    # 也就是「预读缓冲必须覆盖整段音频」。引擎只会把这
-                    # preload 字节读进内存后整块循环，所以这里必须 >= length，
-                    # 否则「引子+循环体」会被截断，循环体听不全。
+                    # 原版 18 条轨道的 unknown(+0x14) 一律是 total_len 的
+                    # 1.03~1.27 倍，也就是「预读缓冲必须覆盖整段音频」。
+                    # 引擎只把它读进内存后整块循环，所以这里必须 >= length，
+                    # 否则循环体会被截断。
                     track.preload = max(int(length * 1.1), length)
                 offset += length
                 if progress:

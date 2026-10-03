@@ -116,9 +116,10 @@ check("保存成功", code == 200 and saved.get("ok") is not False,
 fmt = read_disk_fmt()
 tr = fmt.tracks[0]
 print("   磁盘: offset=%d loop=%d end=%d" % (tr.offset, tr.loop, tr.end))
-check("新音频长度 + 引子写对了", tr.end == n_a + TARGET,
-      "实际 %d 期望 %d(%d+%d)" % (tr.end, n_a + TARGET, n_a, TARGET))
-check("★ 循环点 == 8 秒", tr.loop == TARGET,
+check("长度 = 2 × (新音频 20 秒 − 循环点 8 秒)",
+      tr.end == 2 * (n_a - TARGET),
+      "实际 %d 期望 %d" % (tr.end, 2 * (n_a - TARGET)))
+check("★ 循环点字段 = 循环体长度（12 秒）", tr.loop == n_a - TARGET,
       "实际 %d（%.2f 秒）" % (tr.loop, tr.loop / float(BPS)))
 
 # =============================================================== 场景 B
@@ -136,10 +137,12 @@ check("保存成功", code == 200 and saved.get("ok") is not False,
 fmt = read_disk_fmt()
 tr = fmt.tracks[0]
 print("   磁盘: loop=%d end=%d" % (tr.loop, tr.end))
-check("新音频长度 + 引子写对了", tr.end == n_b + TARGET_B,
-      "实际 %d 期望 %d(%d+%d)" % (tr.end, n_b + TARGET_B, n_b, TARGET_B))
-check("★ 循环点 == 60 秒（比原曲长，是个容易踩的场景）",
-      tr.loop == TARGET_B, "实际 %d（%.2f 秒）" % (tr.loop, tr.loop / float(BPS)))
+check("长度 = 2 × (新音频 70 秒 − 循环点 60 秒)",
+      tr.end == 2 * (n_b - TARGET_B),
+      "实际 %d 期望 %d" % (tr.end, 2 * (n_b - TARGET_B)))
+check("★ 循环点字段 = 循环体长度 10 秒（循环点比原曲长也能处理）",
+      tr.loop == n_b - TARGET_B,
+      "实际 %d（%.2f 秒）" % (tr.loop, tr.loop / float(BPS)))
 
 # =============================================================== 场景 C
 print("\n========== 场景 C：先设循环点、再替换曲目 ==========")
@@ -153,8 +156,17 @@ check("保存成功", code == 200 and saved.get("ok") is not False,
       "errors=%s" % saved.get("errors"))
 fmt = read_disk_fmt()
 tr = fmt.tracks[0]
-check("循环点在替换后仍然保留（30 秒）", tr.loop == TARGET_C,
+# 场景 C 顺序：先设循环点 30 秒（当时源是 70 秒的曲子），再替换成 40 秒。
+# 替换会重置循环点基准（新音频 40 秒），所以保存后：
+#   循环体 = 40 − 30 = 10 秒，loop 字段 = 循环体长度，end = 2 × 循环体
+want_c = n_c - TARGET_C
+print("   磁盘: loop=%d end=%d（期望 loop=%d end=%d）"
+      % (tr.loop, tr.end, want_c, 2 * want_c))
+check("循环点在替换后仍然生效（循环体 = 新音频 40s − 循环点 30s）",
+      tr.loop == want_c,
       "实际 %d（%.2f 秒）" % (tr.loop, tr.loop / float(BPS)))
+check("轨道长度 = 2 × 循环体", tr.end == 2 * want_c,
+      "实际 %d 期望 %d" % (tr.end, 2 * want_c))
 
 # =============================================================== 场景 D
 print("\n========== 场景 D：新音频比原循环点还短，循环点应被安全处理 ==========")
@@ -166,11 +178,14 @@ check("保存成功", code == 200 and saved.get("ok") is not False,
       "errors=%s" % saved.get("errors"))
 fmt = read_disk_fmt()
 tr = fmt.tracks[0]
-print("   磁盘: loop=%d end=%d（原循环点 30 秒 = %d 字节，已超出新长度）"
+print("   磁盘: loop=%d end=%d（此前设的循环点 30 秒 = %d 字节，已超出新长度 3 秒）"
       % (tr.loop, tr.end, TARGET_C))
-check("循环点被安全归零（不能大于轨道长度）", 0 <= tr.loop <= tr.end,
+# 循环点超出音频长度时必须安全处理：整首循环（loop=0），长度就是音频本身，
+# 不能出现负数循环体或非法 loop 值。
+check("循环点被安全归零（整首循环）", tr.loop == 0,
       "loop=%d end=%d" % (tr.loop, tr.end))
-check("轨道长度正确", tr.end == n_d, "实际 %d 期望 %d" % (tr.end, n_d))
+check("轨道长度不受影响（= 新音频长度）", tr.end == n_d,
+      "实际 %d 期望 %d" % (tr.end, n_d))
 
 # =============================================================== 自洽性
 print("\n========== 最终 thbgm.dat 自洽性 ==========")

@@ -1430,24 +1430,27 @@ def list_bgm():
     tracks = []
     for t in fmt.tracks:
         pend_len = _pending_pcm_len(t.index)
-        # 有暂存替换时，长度/时长都按新音频算（这才是保存后会生效的值）
-        eff_end = pend_len if pend_len else t.end
+        # 「源长度」= 下次拼接会用的音频长度（暂存替换 > 暂存原始音频 > 盘上）。
+        # 界面上的循环点上限、时长都必须按它算，不能用盘上轨道长度 ——
+        # 保存过一次之后盘上是「循环体×2」，会更短，用户就再也设不了
+        # 更长的循环点了（实测踩到过）。
+        src = _bgm_source_len(t.index, t)
         eff_bytes = t.avg_bytes or bgm.BYTES_PER_SEC
-        # 「循环点」的真正含义：保存时会把音频拼成 [0,loop) + [loop,end)，
-        # 游戏整块循环播放，于是引子播完后就一直在 loop 处循环。所以：
-        #   · 循环点不是「曲子多长」的度量，而是「引子多长」
-        #   · 拼接后曲子会变长，多出来的正好是引子那一截
+        # 保存时会把「循环点之后的部分」重复两遍作为整条轨道
+        # （见 thtk/bgm.py 的 splice_loop_pcm），所以保存后长度 = 2 × 循环体，
+        # 循环体 = 源长度 − 循环点。
         loop = STATE.bgm_loop.get(t.index)   # 只有用户设过才在字典里
-        spliced = (eff_end + loop) if loop else eff_end
+        body = (src - loop) if loop else src
+        spliced = 2 * body if loop else src
         tracks.append({
             "index": t.index,
             "name": t.name,
-            "duration": eff_end / float(eff_bytes) if eff_bytes else 0.0,
-            # 保存后会变成的长度（拼接后 = 原长 + 引子）
+            "duration": src / float(eff_bytes) if eff_bytes else 0.0,
+            # 保存后会变成的长度（= 2 × 循环体）
             "duration_after": spliced / float(eff_bytes) if eff_bytes else 0.0,
             "loop": t.loop,
             "loop_seconds": t.loop / float(eff_bytes) if eff_bytes else 0.0,
-            "size": eff_end,
+            "size": src,
             "orig_size": t.end,
             "pending_size": pend_len,
             "pending": t.index in STATE.bgm_replaced,
@@ -1457,10 +1460,10 @@ def list_bgm():
             # 改动前的原值，界面用来显示「原 X.XX 秒」
             "orig_loop_seconds": STATE.bgm_orig_loop.get(t.index),
             "orig_duration_seconds": STATE.bgm_orig_len.get(t.index),
-            "loop_body_seconds": ((eff_end - loop) / float(eff_bytes))
+            "loop_body_seconds": ((src - loop) / float(eff_bytes))
                                  if (loop and eff_bytes) else None,
-            # 循环点上限：必须小于保存后生效的轨道长度
-            "max_loop_seconds": (eff_end / float(eff_bytes)) if eff_bytes
+            # 循环点上限：必须小于「源音频长度」（不是盘上轨道长度）
+            "max_loop_seconds": (src / float(eff_bytes)) if eff_bytes
                                 else 0.0,
         })
     return {"tracks": tracks,
@@ -1594,6 +1597,34 @@ def bgm_replace(index, wav_data):
     return {"ok": True, "seconds": len(pcm) / float(bgm.BYTES_PER_SEC)}
 
 
+def _bgm_source_len(index, track):
+    """这条曲目**下一次保存时会用来拼接的源音频长度**（字节）。
+
+    这是个容易搞错的概念，单独抽出来：
+      · 有暂存替换     → 新音频（替换完还没保存）
+      · 有暂存的原始音频 → 那个文件（改循环点用的源）
+      · 都没有         → 盘上轨道当前长度
+
+    为什么必须区分：新设计下盘上的轨道内容是「循环体重复两遍」，
+    长度 = 2 × 循环体，**不再是拼接源**。如果拿盘上长度当校验基准，
+    保存过一次循环点之后就再也设不了更长的循环点了 —— 实测踩到过：
+    源 70 秒、设循环点 60 秒并保存后盘上只有 20 秒，
+    再想设 30 秒会被误报「超出曲长 20 秒」。
+    """
+    pend = _pending_pcm_len(index)
+    if pend:
+        return pend
+    path = STATE.bgm_origins.get(index)
+    if path:
+        try:
+            size = os.path.getsize(path)
+            if size > 0:
+                return size
+        except OSError:
+            pass
+    return track.end
+
+
 def bgm_set_loop(index, loop_bytes):
     """设置循环点。
 
@@ -1601,9 +1632,9 @@ def bgm_set_loop(index, loop_bytes):
     替换过音频时按新音频算，否则按原曲算。
 
     重要：这个值**不是**写进 thbgm.fmt 的 loop 字段就算了。th12.exe 的 BGM
-    引擎从不读那个字段（只读 offset 与 preload，然后把整块循环播放），所以
-    保存时会把音频拼成「引子 + 循环体」来达到真正的循环效果，详见
-    bgm.splice_loop_pcm。因此这里还要保证循环体不会短得离谱。
+    引擎从不读那个字段（只读 begin_pos 与 unknown，然后把整块循环播放），
+    所以保存时会把「循环点之后的部分」重复两遍作为整条轨道，详见
+    bgm.splice_loop_pcm。因此这里还要保证「循环体」不会短得离谱。
     """
     fmt = STATE.bgm_fmt()
     if index < 0 or index >= len(fmt.tracks):
@@ -1611,9 +1642,9 @@ def bgm_set_loop(index, loop_bytes):
     track = fmt.tracks[index]
     loop_bytes = max(0, int(loop_bytes))
     loop_bytes -= loop_bytes % 4
-    # 保存后会生效的长度：有暂存替换就是新音频，否则是原曲
-    pend = _pending_pcm_len(index)
-    limit = pend if pend else track.end
+    # 校验基准 = 下一次拼接会用的源音频长度。
+    # 注意不能用 track.end：保存过一次之后盘上轨道是「循环体×2」，会更短。
+    limit = _bgm_source_len(index, track)
     if limit <= 0:
         raise ApiError("这条曲目没有音频数据，无法设置循环点")
     if loop_bytes >= limit:
