@@ -115,16 +115,15 @@ print("\n② 按「原曲时长」设一个循环点（这正是用户会踩的�
 bad_sec = round(orig_sec - 1, 1)        # 例如 58.5 秒，超过新的 20 秒
 bad_bytes = int(bad_sec * BPS)
 code, r = jcall("POST", "/api/bgm.loop?index=0&loop=%d" % bad_bytes)
-check("接口接受（它不判上限）", code == 200, str(r)[:60])
+# 以前这里返回 200，超界值会在重建 thbgm.dat 时被静默清零，
+# 用户看到「已设为 58.5 秒」却永远听不到效果。现在当场拒绝并说明原因。
+check("接口直接拒绝超界循环点（不再静默清零）", code == 400,
+      "HTTP %s %s" % (code, str(r)[:80]))
+check("拒绝时说明上限", "20.00" in str(r), str(r)[:100])
 code, bgm = jcall("GET", "/api/bgm")
 t0 = bgm["tracks"][0]
-print("   接口回报 pending_loop=%.2f 秒，上限 %.2f 秒"
-      % ((t0.get("pending_loop") or 0) / BPS, t0.get("max_loop_seconds") or 0))
-check("界面能看出这个循环点超过了上限（前端据此提示/限制）",
-      (t0.get("pending_loop") or 0) > (t0.get("max_loop_seconds") or 0) * BPS,
-      "pending_loop_bytes=%s max=%s"
-      % (t0.get("pending_loop"),
-         int((t0.get("max_loop_seconds") or 0) * BPS)))
+check("被拒绝的值没有进入暂存", t0.get("pending_loop") in (None, 0),
+      str(t0.get("pending_loop")))
 
 # ---------------------------------------------------------------- 改成合法值
 print("\n③ 改成合法循环点（12 秒）并保存")
@@ -139,9 +138,14 @@ fmt = bgmmod.BgmFmt.from_bytes(a.read_by_name("thbgm.fmt"))
 tr = fmt.tracks[0]
 print("   磁盘: loop=%d（%.2f 秒）end=%d（%.2f 秒）"
       % (tr.loop, tr.loop / float(BPS), tr.end, tr.end / float(BPS)))
-check("轨道长度 = 新音频", tr.end == n20, "%d vs %d" % (tr.end, n20))
+# 保存时会把 [0,循环点) 这份「引子」复制到末尾，所以最终长度 = 新音频 + 引子。
+# 这是循环点真正生效的机制（引擎不读 thbgm.fmt 的 loop 字段）。
+check("轨道长度 = 新音频长度 + 引子长度", tr.end == n20 + good_bytes,
+      "%d vs %d(新音频)+%d(引子)" % (tr.end, n20, good_bytes))
 check("★ 循环点写进磁盘 = 12 秒", tr.loop == good_bytes,
       "实际 %.2f 秒" % (tr.loop / float(BPS)))
+check("preload 覆盖整条（否则循环体会被截断）", tr.preload >= tr.end,
+      "preload=%d end=%d" % (tr.preload, tr.end))
 
 # ---------------------------------------------------------------- 导出 WAV 合法
 print("\n④ 替换后导出的 WAV 必须是合法 WAV")
@@ -187,14 +191,19 @@ check("保存成功", code == 200 and saved.get("ok") is not False,
 a = archive.Archive.from_file(os.path.join(tmp, "th12.dat"))
 fmt = bgmmod.BgmFmt.from_bytes(a.read_by_name("thbgm.fmt"))
 t2, t3 = fmt.tracks[2], fmt.tracks[3]
-print("   曲目2: end=%d loop=%d（应为 10 秒 / 3 秒）" % (t2.end, t2.loop))
-print("   曲目3: loop=%d（应为 4 秒）" % t3.loop)
-check("曲目2 长度 = 新音频 10 秒", t2.end == int(10.0 * BPS),
-      "%d vs %d" % (t2.end, int(10.0 * BPS)))
+print("   曲目2: end=%d loop=%d（新音频 10 秒 + 引子 3 秒）" % (t2.end, t2.loop))
+print("   曲目3: end=%d loop=%d（原曲 + 引子 4 秒）" % (t3.end, t3.loop))
+check("曲目2 长度 = 新音频 10 秒 + 引子 3 秒",
+      t2.end == int(10.0 * BPS) + int(3.0 * BPS),
+      "%d vs %d" % (t2.end, int(13.0 * BPS)))
 check("曲目2 循环点 = 3 秒", t2.loop == int(3.0 * BPS),
       "实际 %.2f 秒" % (t2.loop / float(BPS)))
 check("曲目3 循环点 = 4 秒", t3.loop == int(4.0 * BPS),
       "实际 %.2f 秒" % (t3.loop / float(BPS)))
+# 曲目3 只设了循环点（没替换音频），也一样要拼接并把 preload 撑到覆盖整条
+check("只改循环点的曲目也做了拼接且 preload 覆盖整条",
+      t3.end > int(4.0 * BPS) and t3.preload >= t3.end,
+      "end=%d preload=%d" % (t3.end, t3.preload))
 
 print("\n" + "=" * 78)
 print("通过 %d 项，失败 %d 项" % (len(PASS), len(FAIL)))

@@ -857,8 +857,11 @@ class State(object):
         self.pending_seq = 0
         self.fmt = None
         self.bgm_pending = {}     # index -> 暂存的 PCM 文件路径
-        self.bgm_loop = {}        # index -> 新的循环点（字节）
+        self.bgm_loop = {}        # index -> 新的循环点（字节，保存时做音频拼接）
         self.bgm_replaced = set()
+        self.bgm_orig_loop = {}   # index -> 改动前的循环点（秒），仅用于界面显示
+        self.bgm_orig_len = {}    # index -> 改动前的曲长（秒），仅用于界面显示
+        self.bgm_origins = {}     # index -> 未拼接的原始 PCM 暂存路径
         self.bgm_error = {}       # key -> 上次读取失败的原因
         self.game_key = "jp"
         self.batch = []
@@ -1013,23 +1016,52 @@ def list_pending():
             fmt = STATE.bgm_fmt()
         except Exception:
             fmt = None
-    for idx in bgm_replace:
+    for idx in sorted(set(bgm_replace) | set(bgm_loop)):
         name = fmt.tracks[idx].name if fmt else ("曲目 %d" % idx)
-        out.append({"kind": "bgm", "game": "bgm", "name": name,
-                    "action": "替换BGM", "detail": "整个曲目已替换",
-                    "size_text": "", "time": ""})
-    for idx, loop in bgm_loop.items():
+        loop = bgm_loop.get(idx)
+        parts = []
         if idx in bgm_replace:
-            continue
-        name = fmt.tracks[idx].name if fmt else ("曲目 %d" % idx)
+            parts.append("整个曲目已替换")
+        if loop is not None:
+            body = None
+            if fmt:
+                pend_len = _pending_pcm_len(idx)
+                total = pend_len if pend_len else fmt.tracks[idx].end
+                body = (total - loop) / float(bgm.BYTES_PER_SEC)
+            text = "循环点 %.2f 秒" % (loop / float(bgm.BYTES_PER_SEC))
+            if body is not None:
+                text += "（保存时按此拼接音频，循环体 %.2f 秒）" % body
+            parts.append(text)
         out.append({"kind": "bgm", "game": "bgm", "name": name,
-                    "action": "循环点", "detail": "%.2f 秒"
-                    % (loop / float(bgm.BYTES_PER_SEC)),
+                    "action": "替换BGM" if idx in bgm_replace else "循环点",
+                    "detail": "；".join(parts),
                     "size_text": "", "time": ""})
     return {"items": out, "count": len(out)}
 
 
-def clear_pending():
+def _drop_bgm_origins(keep=False):
+    """清掉「未拼接原始音频」的记录（调用方需已持有 STATE.lock）。
+
+    :param keep: True 表示**什么都别清** —— 文件与记录都保留。保存成功后
+        必须这样：那些文件是「未经拼接的原始音频」，下次再改循环点还要以
+        它们为准，删了或忘了记录就会退化成「从已拼接的结果再拼一次」，
+        音频会越拼越长（这里踩过一次：只护住了删文件，忘了护住清记录）。
+    """
+    if keep:
+        return
+    for path in STATE.bgm_origins.values():
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    STATE.bgm_origins = {}
+
+
+def clear_pending(keep_bgm_origins=False):
+    """清空待保存项。
+
+    :param keep_bgm_origins: 保存成功后传 True，保留拼接用的原始音频。
+    """
     with STATE.lock:
         for it in STATE.pending:
             try:
@@ -1037,6 +1069,7 @@ def clear_pending():
             except OSError:
                 pass
         STATE.pending = []
+        _drop_bgm_origins(keep=keep_bgm_origins)
         for path in STATE.bgm_pending.values():
             try:
                 os.remove(path)
@@ -1045,6 +1078,8 @@ def clear_pending():
         STATE.bgm_pending = {}
         STATE.bgm_loop = {}
         STATE.bgm_replaced = set()
+        STATE.bgm_orig_loop = {}
+        STATE.bgm_orig_len = {}
     return {"ok": True}
 
 
@@ -1052,8 +1087,9 @@ def clean_staging_orphans():
     """启动时清掉暂存目录里没人引用的分片。
 
     暂存是「这次会话还没保存的改动」，进程重启后 STATE.pending 一律为空，
-    所以磁盘上遗留的 pending_*.bin / track_*.pcm 全都是孤儿 ——
-    留着只会白占空间（实测攒到过 55 MB）。
+    所以磁盘上遗留的 pending_*.bin / track_*.pcm / src_*.pcm 全都是孤儿 ——
+    留着只会白占空间（实测攒到过 55 MB；src_*.pcm 是整条曲子的 PCM，
+    单条可能十几 MB，更需要清）。
     返回 (删除文件数, 释放字节数)。
     """
     removed = 0
@@ -1065,7 +1101,8 @@ def clean_staging_orphans():
     except OSError:
         return removed, freed
     for name in names:
-        if not (name.startswith("pending_") or name.startswith("track_")):
+        if not (name.startswith("pending_") or name.startswith("track_")
+                or name.startswith("src_")):
             continue
         path = os.path.join(STAGING_DIR, name)
         try:
@@ -1078,6 +1115,59 @@ def clean_staging_orphans():
         except OSError:
             continue
     return removed, freed
+
+
+def _copy_range(src_path, offset, length, dst_path, chunk=1 << 20):
+    """把 src_path 的 [offset, offset+length) 字节复制到 dst_path。
+
+    分块复制，避免为了暂存一条曲子把整段读进内存（原曲单条可到 40 MB）。
+    """
+    remaining = length
+    with open(src_path, "rb") as fin, open(dst_path, "wb") as fout:
+        fin.seek(offset)
+        while remaining > 0:
+            data = fin.read(min(chunk, remaining))
+            if not data:
+                raise OSError("源文件在偏移 %d 处提前结束" % (offset + length
+                                                             - remaining))
+            fout.write(data)
+            remaining -= len(data)
+
+
+def _ensure_bgm_origins(fmt, bgm_loop, bgm_pending):
+    """确保每个「要拼接」的轨道在暂存里都有一份未拼接的原始音频。
+
+    为什么需要：拼接是对源音频做的。如果第二次改循环点时源已经是上一次
+    拼接的结果（引子多了一份），就会越拼越长、内容也错。
+    所以第一次给某条轨道设循环点时，先把它当时的音频原样存一份到暂存，
+    之后每次保存都以这份为准，无论改多少次循环点结果都正确。
+
+    有暂存替换时，替换后的新音频本身就是「原始音频」，直接用它。
+    """
+    need = set(bgm_loop) - set(STATE.bgm_origins)
+    if not need:
+        return dict(STATE.bgm_origins)
+    origins = dict(STATE.bgm_origins)
+    for idx in sorted(need):
+        if idx < 0 or idx >= len(fmt.tracks):
+            continue
+        track = fmt.tracks[idx]
+        dst = os.path.join(STAGING_DIR, "src_%02d.pcm" % idx)
+        src_file = bgm_pending.get(idx)
+        try:
+            if src_file and os.path.isfile(src_file):
+                shutil.copyfile(src_file, dst)
+            else:
+                _copy_range(BGM_DAT, track.offset, track.end, dst)
+        except OSError as ex:
+            log("BGM 暂存原始音频失败", track.name, str(ex))
+            continue
+        origins[idx] = dst
+        STATE.bgm_origins[idx] = dst
+        log("暂存BGM原始音频", track.name,
+            "%s（用于反复修改循环点时保持结果正确）"
+            % human_size(os.path.getsize(dst)))
+    return origins
 
 
 def save_all(comment=""):
@@ -1100,15 +1190,19 @@ def save_all(comment=""):
     fmt_bytes = None
     if bgm_pending or bgm_loop:
         fmt = STATE.bgm_fmt()
-        for idx, loop in bgm_loop.items():
-            fmt.tracks[idx].loop = loop
+        # 不用在这里写 fmt.tracks[idx].loop：rebuild_bgm_dat 会按 loops
+        # 设置它（并保证与拼接后的音频一致）。这里只负责重建。
+        origins = _ensure_bgm_origins(fmt, bgm_loop, bgm_pending)
         temp_bgm = BGM_DAT + ".new"
         total_tracks = len(fmt.tracks)
         tok = PROGRESS.start("正在重建 thbgm.dat（约 400MB）",
                              total_tracks)
         try:
+            # loops 才是真正驱动循环的：列在里面的轨道会被拼成
+            # 「引子 + 循环体」。只改 fmt 的 loop 字段没用（引擎不读）。
             bgm.rebuild_bgm_dat(
-                BGM_DAT, temp_bgm, bgm_pending, fmt,
+                BGM_DAT, temp_bgm, bgm_pending, fmt, loops=bgm_loop,
+                origins=origins,
                 progress=lambda done, total: PROGRESS.update(
                     current=done, total=total, token=tok,
                     detail=fmt.tracks[min(done, total - 1)].name
@@ -1222,24 +1316,34 @@ def save_all(comment=""):
         log("保存BGM修改", "%d 首替换 / %d 首循环点"
             % (len(bgm_pending), len(bgm_loop)),
             comment or human_size(os.path.getsize(BGM_DAT)))
+    # 内存缓存必须整体丢掉，而且【不能】放在下面的循环里 ——
+    # 以前 STATE.fmt 的清理写在 for archives 循环内部，只改 BGM 循环点、
+    # 不改任何归档条目的那一次保存不会进循环……但 thbgm.fmt 其实也是
+    # 归档条目（被算进了 archives），所以之前"侥幸正确"。真正的原因：
+    # save_all 前半段直接改了 STATE.bgm_fmt() 返回对象的 loop 字段，
+    # 缓存和磁盘短暂不一致；只要以后有人改这里的分支，就会变成
+    # "第一次生效、后续写回旧值"。放在循环外，语义才明确。
+    with STATE.lock:
+        # 只清 anm_cache/texture_index 不够：STATE.archives 里缓存的
+        # Archive 对象还持有替换前的条目表，下一次读（例如
+        # /api/musiccmt）会从它读出旧内容，而磁盘其实已经是新的。
+        for key in archives:
+            STATE.archives.pop(key, None)
+        STATE.fmt = None
+        STATE.anm_cache = {}
+        STATE.texture_index = {}
+
     for key, item in archives.items():
         items = arch_items.get(key, [])
-        with STATE.lock:
-            # 归档内容变了，内存缓存必须一起丢掉 ——
-            # 只清 anm_cache/texture_index 不够：STATE.archives 里缓存的
-            # Archive 对象还持有替换前的条目表，下一次读（例如
-            # /api/musiccmt）会从它读出旧内容，而磁盘其实已经是新的。
-            STATE.archives.pop(key, None)
-            STATE.fmt = None
-            STATE.anm_cache = {}
-            STATE.texture_index = {}
         result["files"] += len(items)
         for it in items:
             log(it["action"], "%s / %s" % (GAMES[key]["label"], it["name"]),
                 (it["detail"] + ("　备注: " + comment if comment else "")))
 
     # ---- 5) 清空暂存 ----
-    clear_pending()
+    # 保留 bgm 的「未拼接原始音频」：下次再改同一条曲子的循环点时，
+    # 必须仍然以原始音频为源来拼，否则会叠加成越来越长的音频。
+    clear_pending(keep_bgm_origins=True)
     PROGRESS.done()
     return result
 
@@ -1329,21 +1433,33 @@ def list_bgm():
         # 有暂存替换时，长度/时长都按新音频算（这才是保存后会生效的值）
         eff_end = pend_len if pend_len else t.end
         eff_bytes = t.avg_bytes or bgm.BYTES_PER_SEC
-        loop = STATE.bgm_loop.get(t.index, t.loop)
+        # 「循环点」的真正含义：保存时会把音频拼成 [0,loop) + [loop,end)，
+        # 游戏整块循环播放，于是引子播完后就一直在 loop 处循环。所以：
+        #   · 循环点不是「曲子多长」的度量，而是「引子多长」
+        #   · 拼接后曲子会变长，多出来的正好是引子那一截
+        loop = STATE.bgm_loop.get(t.index)   # 只有用户设过才在字典里
+        spliced = (eff_end + loop) if loop else eff_end
         tracks.append({
             "index": t.index,
             "name": t.name,
             "duration": eff_end / float(eff_bytes) if eff_bytes else 0.0,
+            # 保存后会变成的长度（拼接后 = 原长 + 引子）
+            "duration_after": spliced / float(eff_bytes) if eff_bytes else 0.0,
             "loop": t.loop,
             "loop_seconds": t.loop / float(eff_bytes) if eff_bytes else 0.0,
             "size": eff_end,
             "orig_size": t.end,
             "pending_size": pend_len,
             "pending": t.index in STATE.bgm_replaced,
-            "pending_loop": STATE.bgm_loop.get(t.index),
-            "pending_loop_seconds": (loop / float(eff_bytes)) if eff_bytes
-                                    else 0.0,
-            # 循环点上限：不能超过保存后的轨道长度
+            "pending_loop": loop,
+            "pending_loop_seconds": (loop / float(eff_bytes))
+                                    if (loop and eff_bytes) else 0.0,
+            # 改动前的原值，界面用来显示「原 X.XX 秒」
+            "orig_loop_seconds": STATE.bgm_orig_loop.get(t.index),
+            "orig_duration_seconds": STATE.bgm_orig_len.get(t.index),
+            "loop_body_seconds": ((eff_end - loop) / float(eff_bytes))
+                                 if (loop and eff_bytes) else None,
+            # 循环点上限：必须小于保存后生效的轨道长度
             "max_loop_seconds": (eff_end / float(eff_bytes)) if eff_bytes
                                 else 0.0,
         })
@@ -1376,23 +1492,6 @@ def bgm_wav(index):
 _PEAK_CACHE = {}
 _PEAK_CACHE_MAX = 24
 _PEAK_WARMING = set()
-
-
-def warm_up_bgm_peaks():
-    """后台把所有曲目的波形算一遍，这样用户点开音乐页时是秒开的。
-
-    注意：这里会读 thbgm.dat 的每一段（约 400 MB 顺序读），
-    用后台线程跑，不挡任何请求。算好的结果进 _PEAK_CACHE。
-    """
-    try:
-        fmt = STATE.bgm_fmt()
-    except Exception:
-        return
-    for t in fmt.tracks:
-        try:
-            bgm_peaks(t.index, 900)
-        except Exception:
-            continue
 
 
 def bgm_peaks(index, points=900):
@@ -1478,6 +1577,17 @@ def bgm_replace(index, wav_data):
     with STATE.lock:
         STATE.bgm_pending[index] = path
         STATE.bgm_replaced.add(index)
+        # 记下替换前的原始循环点，界面要显示「原 X.XX 秒」做对比
+        STATE.bgm_orig_loop.setdefault(
+            index, fmt.tracks[index].loop / float(bgm.BYTES_PER_SEC))
+        # 换了音频，之前留的「未拼接原始音频」就过期了 —— 丢掉，
+        # 让下次保存时以这份新音频为拼接源重新存一份。
+        stale = STATE.bgm_origins.pop(index, None)
+        if stale:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
     log("替换BGM（暂存）", fmt.tracks[index].name,
         "%.1f 秒 / %s" % (len(pcm) / float(bgm.BYTES_PER_SEC),
                           human_size(len(pcm))))
@@ -1485,16 +1595,53 @@ def bgm_replace(index, wav_data):
 
 
 def bgm_set_loop(index, loop_bytes):
+    """设置循环点。
+
+    循环点是相对轨道起点的字节数，必须落在 [0, 轨道长度) 内 ——
+    替换过音频时按新音频算，否则按原曲算。
+
+    重要：这个值**不是**写进 thbgm.fmt 的 loop 字段就算了。th12.exe 的 BGM
+    引擎从不读那个字段（只读 offset 与 preload，然后把整块循环播放），所以
+    保存时会把音频拼成「引子 + 循环体」来达到真正的循环效果，详见
+    bgm.splice_loop_pcm。因此这里还要保证循环体不会短得离谱。
+    """
     fmt = STATE.bgm_fmt()
     if index < 0 or index >= len(fmt.tracks):
         raise ApiError("曲目序号不存在", 404)
+    track = fmt.tracks[index]
     loop_bytes = max(0, int(loop_bytes))
     loop_bytes -= loop_bytes % 4
+    # 保存后会生效的长度：有暂存替换就是新音频，否则是原曲
+    pend = _pending_pcm_len(index)
+    limit = pend if pend else track.end
+    if limit <= 0:
+        raise ApiError("这条曲目没有音频数据，无法设置循环点")
+    if loop_bytes >= limit:
+        raise ApiError(
+            "循环点 %.2f 秒超出了这条曲目的长度 %.2f 秒。"
+            "循环点必须小于曲长（它后面那一段才是要反复播放的部分）。"
+            % (loop_bytes / float(bgm.BYTES_PER_SEC),
+               limit / float(bgm.BYTES_PER_SEC)))
+    body = limit - loop_bytes
+    if loop_bytes > 0 and body < bgm.MIN_LOOP_SECONDS * bgm.BYTES_PER_SEC:
+        raise ApiError(
+            "循环体只剩 %.2f 秒，太短了（至少 %.1f 秒）。"
+            "请把循环点往前挪。"
+            % (body / float(bgm.BYTES_PER_SEC), bgm.MIN_LOOP_SECONDS))
     with STATE.lock:
         STATE.bgm_loop[index] = loop_bytes
-    log("设置BGM循环点", fmt.tracks[index].name,
-        "%.2f 秒" % (loop_bytes / float(bgm.BYTES_PER_SEC)))
-    return {"ok": True, "loop": loop_bytes}
+        # 记下原始值（第一次设定时），界面显示「原 X.XX 秒 / 原长 Y.YY 秒」
+        STATE.bgm_orig_loop.setdefault(
+            index, track.loop / float(bgm.BYTES_PER_SEC))
+        STATE.bgm_orig_len.setdefault(
+            index, track.end / float(bgm.BYTES_PER_SEC))
+    log("设置BGM循环点", track.name,
+        "%.2f 秒（保存时会拼接音频实现真正的循环）"
+        % (loop_bytes / float(bgm.BYTES_PER_SEC)))
+    return {"ok": True, "loop": loop_bytes,
+            "length": limit,
+            "max_loop_seconds": limit / float(bgm.BYTES_PER_SEC),
+            "loop_body_seconds": body / float(bgm.BYTES_PER_SEC)}
 
 
 def bgm_cancel():
@@ -1508,6 +1655,9 @@ def bgm_cancel():
         STATE.bgm_pending = {}
         STATE.bgm_loop = {}
         STATE.bgm_replaced = set()
+        STATE.bgm_orig_loop = {}
+        STATE.bgm_orig_len = {}
+        _drop_bgm_origins()
     if n:
         log("放弃BGM修改", "%d 项" % n)
     return {"ok": True}

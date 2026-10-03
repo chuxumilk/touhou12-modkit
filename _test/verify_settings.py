@@ -45,6 +45,14 @@ PARENT = MOD
 _test2 = os.path.join(WS, "测试", "[th12] 东方星莲船 (汉化版+日文版)")
 TEST = _test2 if os.path.isdir(_test2) else MAIN
 ORIG = MOD
+# 「自动扫描能否找到游戏目录」只有游戏目录位于扫描根之下时才成立 ——
+# 扫描根是工作区各层 + 配置里记过的目录，而自检脚本每次启动服务器都会把
+# config.json 清成 {}，所以指向工作区之外的目录（例如自检用的临时副本）
+# 时这两项必然失败。那不是缺陷，只是不在扫描范围内，所以显式跳过而不是
+# 假装通过；用真实游戏目录跑时会正常覆盖。
+_MAIN_IN_WS = os.path.normcase(os.path.normpath(MAIN)).startswith(
+    os.path.normcase(os.path.normpath(WS)) + os.sep)
+SCANNABLE = _MAIN_IN_WS
 
 PASS, FAIL = [], []
 
@@ -87,8 +95,12 @@ check("扫描到候选目录（以前恒为 0）", len(cfg.get("candidates") or 
       "候选 %d 个" % len(cfg.get("candidates") or []))
 cands = [os.path.normcase(os.path.normpath(c["path"]))
          for c in (cfg.get("candidates") or [])]
-check("候选里包含游戏目录本身",
-      os.path.normcase(os.path.normpath(MAIN)) in cands)
+if SCANNABLE:
+    check("候选里包含游戏目录本身",
+          os.path.normcase(os.path.normpath(MAIN)) in cands)
+else:
+    print("  [SKIP] %-52s %s" % ("候选里包含游戏目录本身",
+                                 "游戏目录不在扫描范围内"))
 
 # 深度扫描（「重新扫描」）找到的东西取决于后台预热有没有跑完，
 # 所以这里轮询等待：最多 40 秒，直到候选里出现 MAIN
@@ -100,10 +112,14 @@ for _ in range(20):
     if os.path.normcase(os.path.normpath(MAIN)) in deep_paths:
         break
     time.sleep(2)
-check("重新扫描能找到游戏目录（深度扫描）",
-      os.path.normcase(os.path.normpath(MAIN)) in deep_paths or
-      os.path.normcase(os.path.normpath(TEST)) in deep_paths,
-      "深度扫描 %d 个" % len(deep_paths))
+if SCANNABLE:
+    check("重新扫描能找到游戏目录（深度扫描）",
+          os.path.normcase(os.path.normpath(MAIN)) in deep_paths or
+          os.path.normcase(os.path.normpath(TEST)) in deep_paths,
+          "深度扫描 %d 个" % len(deep_paths))
+else:
+    print("  [SKIP] %-52s %s" % ("重新扫描能找到游戏目录（深度扫描）",
+                                 "游戏目录不在扫描范围内"))
 
 print("\n② /api/check 实时校验")
 code, r = jcall("GET", "/api/check?path=" + urllib.parse.quote(MAIN))

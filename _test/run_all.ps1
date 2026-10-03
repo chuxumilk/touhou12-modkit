@@ -34,6 +34,60 @@ if (-not $env:TH12_DAMAGED_DIR) {
     $c2 = Join-Path $WS "测试\[th12] 东方星莲船 (汉化版+日文版)"
     if (Test-Path -LiteralPath $c2) { $env:TH12_DAMAGED_DIR = $c2 }
 }
+# The on-disk loop suites copy a game dir and must not touch a modified one.
+# Prefer an explicit pristine dir; otherwise fall back to TH12_GAME_DIR
+# (those suites only ever write into their own temp copy).
+if (-not $env:TH12_PRISTINE_DIR) { $env:TH12_PRISTINE_DIR = $env:TH12_GAME_DIR }
+
+# ---------------------------------------------------------------------------
+# Run everything against a throwaway COPY of the game directory.
+#
+# Several suites (verify_save, verify_restore, verify_bgm_replace_loop, and the
+# browser ones) write into the directory they are pointed at. Aimed at a real
+# install that silently damages it: it did exactly that once, leaving
+# th12c.dat unreadable. Copying costs a few seconds and makes the whole run
+# non-destructive, so the pristine dir can stay pristine.
+#
+# TH12_GAME_DIR is retargeted at the copy before the suites start; the
+# caller's original value is remembered as $script:RealGameDir.
+# ---------------------------------------------------------------------------
+$script:RealGameDir = $env:TH12_GAME_DIR
+$script:TempGame = $null
+$script:RealConfig = $null
+
+function New-TempGameCopy {
+    # Delegated to Python: Windows PowerShell 5.1 treats paths containing
+    # characters like < > as wildcards and mangles non-ASCII paths through
+    # the OEM codepage, so Copy-Item silently produced an empty copy.
+    $out = & python _test\make_game_copy.py $script:RealGameDir 2>&1
+    $code = $LASTEXITCODE
+    $path = @($out | Where-Object { $_ -is [string] -and $_ -match '^[A-Za-z]:\\' })
+    if ($code -ne 0 -or $path.Count -eq 0) {
+        Write-Host "  copy failed: $($out | Select-Object -Last 1)" -ForegroundColor Yellow
+        return $false
+    }
+    $script:TempGame = $path[-1].Trim()
+    $env:TH12_GAME_DIR = $script:TempGame
+    $env:TH12_PRISTINE_DIR = $script:TempGame
+    Write-Host "  game dir   : $($script:RealGameDir)"
+    Write-Host "  test copy  : $($script:TempGame)  (all suites run here)"
+    return $true
+}
+
+function Remove-TempGameCopy {
+    if ($script:TempGame -and (Test-Path -LiteralPath $script:TempGame)) {
+        # Also drop the wrapper dir the helper created around the copy.
+        Remove-Item -LiteralPath (Split-Path -Parent $script:TempGame) -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $script:TempGame -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # Start-TestServer blanks config.json on every restart; restore the caller's
+    # own copy byte-for-byte (Copy-Item, no PowerShell string round-trip).
+    $bak = "tools\modtool\config.json.selftest-bak"
+    if (Test-Path -LiteralPath $bak) {
+        Copy-Item -LiteralPath $bak -Destination "tools\modtool\config.json" -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue
+    }
+}
 
 $script:Results = @()
 $script:Server = $null
@@ -112,9 +166,20 @@ function Invoke-NodeTest {
     }
 }
 
+# Keep the caller's real config.json; Start-TestServer blanks it on every start.
+# Handled by a Python helper rather than PowerShell: reading the game path into
+# a PS variable goes through the OEM codepage, which cannot represent the
+# fullwidth parentheses in these directory names, so a PS-side round-trip would
+# write mojibake back into config.json.
+if (Test-Path -LiteralPath "tools\modtool\config.json") {
+    Copy-Item -LiteralPath "tools\modtool\config.json" -Destination "tools\modtool\config.json.selftest-bak" -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host ("=" * 74)
 Write-Host "PRE-DELIVERY SELF-CHECK"
-Write-Host "  game dir   : $($env:TH12_GAME_DIR)"
+if (-not (New-TempGameCopy)) {
+    Write-Host "  game dir   : $($env:TH12_GAME_DIR)  (in-place: suites WILL modify it)"
+}
 if ($env:TH12_DAMAGED_DIR) { Write-Host "  damaged dir: $($env:TH12_DAMAGED_DIR)" }
 Write-Host ("=" * 74)
 
@@ -134,6 +199,18 @@ Invoke-PyTest "restore-safety"    "verify_restore.py"
 Invoke-PyTest "bgm-replace-loop"  "verify_bgm_replace_loop.py"
 Invoke-PyTest "bgm-loop-same-len" "verify_bgm_loop.py"
 Invoke-PyTest "bgm-loop-diff-len" "verify_bgm_loop2.py"
+# These two read the value back from a real archive on disk (the suites above
+# only check the server's own answers), which is what actually proves a loop
+# point survives a save.
+Invoke-PyTest "bgm-loop-ondisk"   "verify_e2e_loop.py"
+Invoke-PyTest "bgm-replace+loop"  "verify_loop_combo.py"
+# The loop point is implemented by splicing audio (the engine ignores the
+# thbgm.fmt loop field), so this one verifies the splice on real PCM.
+Invoke-PyTest "bgm-loop-splice"   "verify_loop_splice.py"
+# Repeated editing is the main real-world usage pattern: change the loop point,
+# replace the track, change it again. A single mistake here silently makes the
+# audio grow on every save, so it gets its own suite.
+Invoke-PyTest "bgm-repeat-edits"  "verify_repeat_edits.py"
 
 Write-Host ""
 Write-Host "--- browser acceptance ---"
@@ -186,6 +263,8 @@ Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyC
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Set-Content -LiteralPath "tools\modtool\config.json" -Value "{}" -Encoding UTF8 -NoNewline
 Remove-Item -LiteralPath (Join-Path $WS "_test\chrome-profile-run") -Recurse -Force -ErrorAction SilentlyContinue
+# Drop the throwaway game copy and put the caller's config.json back.
+Remove-TempGameCopy
 
 Write-Host ""
 Write-Host ("=" * 74)

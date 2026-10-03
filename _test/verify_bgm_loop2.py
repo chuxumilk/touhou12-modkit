@@ -116,7 +116,8 @@ check("保存成功", code == 200 and saved.get("ok") is not False,
 fmt = read_disk_fmt()
 tr = fmt.tracks[0]
 print("   磁盘: offset=%d loop=%d end=%d" % (tr.offset, tr.loop, tr.end))
-check("新音频长度写对了", tr.end == n_a, "实际 %d 期望 %d" % (tr.end, n_a))
+check("新音频长度 + 引子写对了", tr.end == n_a + TARGET,
+      "实际 %d 期望 %d(%d+%d)" % (tr.end, n_a + TARGET, n_a, TARGET))
 check("★ 循环点 == 8 秒", tr.loop == TARGET,
       "实际 %d（%.2f 秒）" % (tr.loop, tr.loop / float(BPS)))
 
@@ -135,7 +136,8 @@ check("保存成功", code == 200 and saved.get("ok") is not False,
 fmt = read_disk_fmt()
 tr = fmt.tracks[0]
 print("   磁盘: loop=%d end=%d" % (tr.loop, tr.end))
-check("新音频长度写对了", tr.end == n_b, "实际 %d 期望 %d" % (tr.end, n_b))
+check("新音频长度 + 引子写对了", tr.end == n_b + TARGET_B,
+      "实际 %d 期望 %d(%d+%d)" % (tr.end, n_b + TARGET_B, n_b, TARGET_B))
 check("★ 循环点 == 60 秒（比原曲长，是个容易踩的场景）",
       tr.loop == TARGET_B, "实际 %d（%.2f 秒）" % (tr.loop, tr.loop / float(BPS)))
 

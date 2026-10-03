@@ -221,17 +221,78 @@ def convert_to_bgm_pcm(data):
     return pcm
 
 
+BYTES_PER_SEC = SAMPLE_RATE * 4          # 16bit 立体声 = 每采样 4 字节
+# 循环体最短长度。太短的循环听上去像卡带，而且拼接后总长几乎不变，
+# 用户会以为「没生效」，所以给一个下限并在接口层直接拒绝。
+MIN_LOOP_SECONDS = 0.5
+
+
+def align4(n):
+    """把字节数向下对齐到 4（一个立体声 16bit 采样）。"""
+    return int(n) - int(n) % 4
+
+
+def splice_loop_pcm(pcm, loop_bytes):
+    """把 PCM 拼成「引子 + 循环体 + 引子」，让游戏真正在循环点接上。
+
+    为什么需要动音频：th12.exe 的 BGM 引擎（0x453940-0x453AD8）只读
+    thbgm.fmt 的 offset 与 preload —— 把 offset 起的 preload 字节读进内存
+    后**整块循环播放**，从不读取 +0x18 的 loop 字段。所以「只改 fmt 里的
+    循环点」永远听不出区别，必须从音频本身下手。
+
+    设引子 = [0, L)、循环体 = [L, end)，拼接结果：
+
+        [ 引子 ][ 循环体 ][ 引子 ]        L 在中间，A = L + (end-L) = end
+         0..L    L..A      A..A+L
+
+    引擎播完 [0, A) 后回到 0 重放，此时听的正好是最后那份引子，
+    它结束的位置紧接循环体开头 —— 于是音乐无缝进入第二段并一直循环：
+
+        时间轴:  引子 → 循环体 → 引子 → 循环体 → 引子 → 循环体 → …
+        听感:    引子 → 循环体 →（无限循环循环体）→ …
+
+    代价：循环体那一份是原样复制的，和引子之间是**硬切**，乐器会断。
+    原曲的 loop 字段本来就是作曲者标的自然衔接点，所以这个断点通常很轻微，
+    但绝不是无缝的。界面必须如实说明。
+
+    :param pcm: 裸 PCM（16bit 立体声 44100Hz，按字节切即可）
+    :param loop_bytes: 循环点（= 引子长度），相对轨道起点的字节数
+    :return: 拼接后的 PCM；loop_bytes 不在 (0, len) 内时原样返回
+    """
+    total = len(pcm)
+    if total <= 0:
+        return pcm
+    loop_bytes = align4(loop_bytes)
+    if loop_bytes <= 0 or loop_bytes >= total:
+        return pcm
+    intro = pcm[:loop_bytes]
+    body = pcm[loop_bytes:]
+    # 中间长度 A = 原曲长度，这样 fmt 里的 offset 表与听感都对得上
+    return intro + body + intro
+
+
 def rebuild_bgm_dat(src_path, dst_path, replacements, fmt,
-                    progress=None):
+                    loops=None, origins=None, progress=None):
     """重建 thbgm.dat。
 
     :param src_path: 原 thbgm.dat
     :param dst_path: 输出路径
-    :param replacements: {轨道下标: pcm_bytes}；未提供的轨道原样复制
-    :param fmt: BgmFmt，会就地更新 offset/preload/end
+    :param replacements: {轨道下标: pcm_bytes 或暂存文件路径}；未提供的轨道
+        原样复制（除非该轨道出现在 loops 里，那时需要读出来做拼接）
+    :param fmt: BgmFmt，会就地更新 offset/preload/end/loop
+    :param loops: {轨道下标: 循环点字节数}。**显式列为待拼接**：只要某条轨道
+        出现在这里，它的音频就会被拼成「引子 + 循环体」，从而让游戏真的在
+        这个位置循环（原因见 splice_loop_pcm 的说明）。不在其中的轨道保持
+        原样，绝不改动 —— 这是「没设循环点的曲子不会被碰」的保证。
+    :param origins: {轨道下标: 那份「尚未拼接过的原始 PCM」的文件路径}。
+        拼接是对源音频做的，所以带拼接的轨道必须在暂存里留一份原始音频：
+        否则用户改第二次循环点时，源已经含上一次的拼接结果，会越拼越长。
+        传了 origins 的轨道一律以该文件为准，并跳过 replacements。
     :param progress: 可选回调 progress(done, total)
     :return: None
     """
+    loops = loops or {}
+    origins = origins or {}
     total = len(fmt.tracks)
     head = read_data_header(src_path)
     src = open(src_path, "rb")
@@ -243,7 +304,16 @@ def rebuild_bgm_dat(src_path, dst_path, replacements, fmt,
             for i, track in enumerate(fmt.tracks):
                 out.seek(offset)
                 pcm = replacements.get(i)
-                if pcm is None:
+                loop = loops.get(i)
+                origin = origins.get(i)
+                has_loop = i in loops          # 显式设定过（0 也算）
+                if origin:
+                    # 暂存里有「未拼接过的原始音频」，一律以它为准：
+                    # 这样反复改循环点不会把上一次的拼接结果再拼一遍
+                    with open(origin, "rb") as f:
+                        pcm = f.read()
+                if pcm is None and not has_loop:
+                    # 没动过这条：原样复制，连循环点字段都不碰
                     src.seek(track.offset)
                     remaining = track.end
                     while remaining > 0:
@@ -254,21 +324,32 @@ def rebuild_bgm_dat(src_path, dst_path, replacements, fmt,
                         out.write(chunk)
                         remaining -= len(chunk)
                     length = track.end
-                elif isinstance(pcm, (bytes, bytearray)):
+                else:
+                    if pcm is None:
+                        # 只改循环点：把原音频读出来再拼
+                        src.seek(track.offset)
+                        pcm = src.read(track.end)
+                        if len(pcm) != track.end:
+                            raise BgmError("源文件在轨道 %s 处提前结束"
+                                           % track.name)
+                    elif not isinstance(pcm, (bytes, bytearray)):
+                        # 传入了暂存文件路径
+                        with open(pcm, "rb") as f:
+                            pcm = f.read()
+                    pcm = splice_loop_pcm(pcm, loop) if has_loop else pcm
                     out.write(pcm)
                     length = len(pcm)
-                else:
-                    # 传入了暂存文件路径
-                    with open(pcm, "rb") as f:
-                        shutil.copyfileobj(f, out, 1 << 20)
-                    length = os.path.getsize(pcm)
+                    # 拼接后 fmt 里的 loop 指向「循环体起点」，与原曲语义一致
+                    track.loop = align4(loop) if has_loop else 0
                 track.offset = offset
                 track.end = length
                 if pcm is not None:
-                    # 预读整个轨道；循环点保持用户设定（默认 0）
-                    track.preload = length
-                    if track.loop > length:
-                        track.loop = 0
+                    # 预读整条轨道，并保留余量。
+                    # 原版 18 条轨道的 preload 一律是 end 的 1.03~1.27 倍，
+                    # 也就是「预读缓冲必须覆盖整段音频」。引擎只会把这
+                    # preload 字节读进内存后整块循环，所以这里必须 >= length，
+                    # 否则「引子+循环体」会被截断，循环体听不全。
+                    track.preload = max(int(length * 1.1), length)
                 offset += length
                 if progress:
                     progress(i + 1, total)

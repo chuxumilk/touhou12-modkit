@@ -710,6 +710,15 @@ function renderBgm() {
       ? `<span class="pill warn">已暂存替换 · ${fmtDuration(t.duration)}</span>`
       : '<span class="pill">原始</span>';
     const cap = t.max_loop_seconds || t.duration || 0;
+    // 循环点 = 引子长度。保存时把这段复制到末尾，游戏整块循环播放，
+    // 于是引子只播一次、之后一直在循环点处循环。
+    const loopHint = t.pending_loop != null
+      ? `<br><span class="muted" style="font-size:11px">待保存 · 保存后 `
+        + `总长 ${(t.duration_after || t.duration).toFixed(1)} 秒`
+        + (t.orig_loop_seconds != null && t.orig_loop_seconds > 0
+          ? `，原 ${t.orig_loop_seconds.toFixed(1)} 秒` : "")
+        + `</span>`
+      : "";
     tr.innerHTML = `
       <td>${t.index}</td>
       <td>${t.name}</td>
@@ -720,9 +729,7 @@ function renderBgm() {
       <td><input type="number" min="0" step="0.1" style="width:90px"
            max="${cap.toFixed(1)}"
            value="${loopSec.toFixed(1)}" data-loop="${t.index}"> 秒
-        ${t.pending_loop != null
-          ? '<br><span class="muted" style="font-size:11px">待保存</span>'
-          : ""}</td>
+        ${loopHint}</td>
       <td>${status}</td>
       <td><button class="mini" data-act="play">▶ 试听</button></td>
       <td><div class="row-actions">
@@ -749,12 +756,20 @@ const WAVE = {
   index: null,          // 当前曲目
   peaks: null,          // 0..100 的包络数组
   sec: 0,               // 总时长（秒）
+  maxSec: 0,            // 循环点上限（保存后生效的轨道长度）
   loopBytes: 0,         // 当前循环点（字节）
   pending: false,       // 该循环点是否还没保存
   drag: null,           // "A" | null
   timer: null,          // 播放头刷新定时器
   raf: null,
 };
+
+/** 把秒数夹到合法范围（0 <= sec <= 循环点上限）。 */
+function clampLoopSec(sec) {
+  const cap = WAVE.maxSec || WAVE.sec || 0;
+  if (!isFinite(sec) || sec < 0) return 0;
+  return cap > 0 ? Math.min(sec, cap) : sec;
+}
 
 function fmtSec(s) {
   s = Math.max(0, s || 0);
@@ -853,12 +868,21 @@ function updateWaveSide() {
   $("#bgm-total").textContent = fmtSec(WAVE.sec);
   $("#bgm-loop-show").textContent = (WAVE.loopBytes / 176400).toFixed(2);
   const note = $("#bgm-loop-note");
+  // 这里显示的是「保存后会变成什么」。th12.exe 只把音频整块循环播放，
+  // 不认 thbgm.fmt 里的循环点字段，所以保存时会把 [0,循环点) 复制到末尾：
+  // 播放序列变成 引子 → 循环体 → 引子 →（一直循环循环体）。
+  // 想改成别的位置就得重新保存，每个位置都会重算拼接。
   if (WAVE.pending) {
-    note.textContent = "（未保存）";
+    const intro = WAVE.loopBytes / 176400;
+    note.textContent = intro > 0
+      ? `（未保存）保存后总长 ${(WAVE.sec + intro).toFixed(1)} 秒：`
+        + `前 ${intro.toFixed(1)} 秒是引子，之后一直在 ${intro.toFixed(1)} 秒处循环`
+      : "（未保存）保存后整首循环";
   } else if (WAVE.loopBytes === 0) {
-    note.textContent = "（从头循环）";
+    note.textContent = "（整首循环）";
   } else {
-    note.textContent = "";
+    note.textContent = "（这是文件里的原值，TH12 引擎并不读它；"
+      + "要让改动生效请设置循环点并保存）";
   }
   $(".player-loop").classList.toggle("dirty", !!WAVE.pending);
   const btn = $("#bgm-play");
@@ -869,6 +893,9 @@ async function openWavePlayer(t) {
   WAVE.index = t.index;
   WAVE.peaks = null;
   WAVE.sec = t.duration || 0;
+  // 循环点上限 = 保存后会生效的轨道长度。超过这个值服务端会拒绝
+  // （否则保存时会被静默清零，表现为「改了没效果」）。
+  WAVE.maxSec = t.max_loop_seconds || WAVE.sec || 0;
   WAVE.loopBytes = (t.pending_loop != null ? t.pending_loop : t.loop) || 0;
   WAVE.pending = t.pending_loop != null;
   $("#bgm-player").classList.remove("hidden");
@@ -956,7 +983,7 @@ $("#bgm-canvas").onmousedown = (e) => {
 };
 window.addEventListener("mousemove", (e) => {
   if (WAVE.drag !== "A") return;
-  const sec = waveTimeAt(e.clientX);
+  const sec = clampLoopSec(waveTimeAt(e.clientX));
   WAVE.loopBytes = Math.max(0, Math.round(sec * 176400));
   WAVE.pending = true;              // 还没点「设置循环点」，先标记未保存
   drawWave();
@@ -990,7 +1017,8 @@ $("#bgm-stop").onclick = () => {
 $("#bgm-loop-here").onclick = () => {
   const audio = $("#bgm-audio");
   if (!audio) return;
-  WAVE.loopBytes = Math.round((audio.currentTime || 0) * 176400);
+  const sec = clampLoopSec(audio.currentTime || 0);
+  WAVE.loopBytes = Math.round(sec * 176400);
   const input = document.querySelector(`input[data-loop="${WAVE.index}"]`);
   if (input) input.value = (WAVE.loopBytes / 176400).toFixed(1);
   setBgmLoop({ index: WAVE.index });
@@ -1045,7 +1073,16 @@ async function replaceBgm(t) {
 
 async function setBgmLoop(t) {
   const input = document.querySelector(`input[data-loop="${t.index}"]`);
-  const sec = parseFloat(input.value) || 0;
+  const raw = parseFloat(input.value) || 0;
+  // 夹到「保存后生效的轨道长度」以内。以前不夹：超界的值会被后端
+  // 在重建 thbgm.dat 时静默清零，用户看到的却是「已设为 60 秒」，
+  // 于是以为循环点功能没用。
+  const cap = (WAVE.index === t.index && WAVE.maxSec) ? WAVE.maxSec : 0;
+  const sec = cap > 0 ? Math.min(Math.max(0, raw), cap) : Math.max(0, raw);
+  if (input && sec !== raw) {
+    input.value = sec.toFixed(1);
+    toast(`循环点最长为 ${cap.toFixed(2)} 秒，已调整`, true);
+  }
   try {
     const res = await api(
       `/api/bgm.loop?index=${t.index}&loop=${Math.round(sec * 44100 * 4)}`,
@@ -1055,6 +1092,7 @@ async function setBgmLoop(t) {
     // 和表格输入框显示的值对不上（用户会以为没生效）。
     if (WAVE.index === t.index) {
       WAVE.loopBytes = res.loop || 0;
+      if (res.max_loop_seconds) WAVE.maxSec = res.max_loop_seconds;
       WAVE.pending = true;
       drawWave();
       updateWaveSide();

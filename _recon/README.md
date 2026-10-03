@@ -13,6 +13,7 @@
 | `probe_dat.py` | `dat_header.txt` | 归档头部逐字段 dump 与边界自洽性校验 |
 | `probe2.py` | `dat_probe2.txt` | 多假设探测：明文名扫描 / 熵与分布 |
 | `probe_exe.py` | `exe_probe.txt` | th12.exe 的 PE 结构与关键立即数搜索 |
+| `th12_bgm_engine.py` | —（直接打印） | **反汇编证明 BGM 引擎不读 thbgm.fmt 的 loop 字段**，见下节 |
 | `verify1.py` / `verify2.py` | `verify1.txt` / `verify2.txt` | **对照验证**：本项目 `thtk` 与官方 thtk 的结果对比（`verify2.py` 是增量落盘版，可中断） |
 | `diag.py` | `list.txt` | 用 UnRAR 列出游戏压缩包内容（排查中文路径编码问题） |
 | `extract.py` / `extract_core.py` | — | 从压缩包提取 `th12.dat` / `th12.exe` 等（`extract_core.py` 用 ASCII 通配符绕开非 ASCII 路径问题） |
@@ -34,6 +35,52 @@ python _recon\verify2.py
 > 注意：这些脚本的输出**直接写在 `_recon/` 里**（`*.txt` 已入库），
 > 重新跑一遍会让这些文件变成 dirty 状态。想保留原始记录的话，
 > 跑之前先 `git stash` 或复制一份。
+
+## thbgm.fmt 的 loop 字段在 TH12 里不起作用（重要）
+
+用户报「改循环点没效果」时查出来的结论，推翻了「改 fmt 字段就能改循环点」的
+想当然做法。证据链：
+
+1. **写入没问题**。改循环点后重新解档，`th12.dat` / `th12c.dat` 里的
+   `thbgm.fmt` 都确实带上了新值，`thbgm.dat` 与 fmt 的 begin_pos/total_len
+   也首尾相接（17/17 条相接，最后一条结束位置正好等于文件大小）。
+2. **游戏不读它**。`th12.exe` 的 BGM 播放器在 `0x00453940`-`0x00453AD8`：
+   ```
+   0x004539B5  CreateFileA(".\thbgm.dat")
+   0x00453A19  eax = entry[+0x10]   → begin_pos，用来定位文件指针
+   0x00453A2F  eax = entry[+0x14]   → unknown，malloc 这么多字节读进内存
+   关闭时      free(buf) / Release()
+   ```
+   另有一处 `0x00466B70  mov eax, [ebx+0x1c]` → `total_len`，
+   用来算 DirectSound 缓冲大小。
+   fmt 基址 `0x004D0E6C` 在整个 exe 里只有 **9 处**引用，逐条查完都只涉及
+   `+0x10` / `+0x14` / `+0x1C`；**`+0x18`（begin_len，即循环点）一次都没被读过**
+   （用 `th12_bgm_engine.py` 可复现：按函数边界切出 2057 个函数做数据流跟踪，
+   命中 0 处）。
+3. **交叉验证（两个独立来源）**：
+   - `[th10] 东方风神录` 目录里有一个独立的 `thbgm.fmt`（953 字节
+     = 18×0x34 + 17 字节尾串），字段布局与 TH12 完全一致、
+     18/18 条 `unknown > total_len`，说明这个格式跨作品稳定，不是我们读错了。
+   - [`RUEEE/TH_BGM_Replacer`](https://github.com/RUEEE/TH_BGM_Replacer) 的
+     `BGM_def.h` 把 `+0x18` 命名为 `begin_len` 并明确注释为循环点
+     （`GetLoopPos() = beginPos + beginLen`），与本项目的读法一致；
+     它是靠 XAudio2 的 `LoopBegin`/`LoopLength` 在**自己的播放器里**做循环，
+     并不改变游戏引擎的行为。
+
+**字段命名（以 RUEEE 的定义为准，比本工具早期的叫法准确）**：
+
+| 偏移 | 名称 | 含义 | 引擎是否使用 |
+| --- | --- | --- | --- |
+| 0x10 | `begin_pos` | 数据在 thbgm.dat 里的起点 | ✅ 定位文件指针 |
+| 0x14 | `unknown` | PCM 缓冲的分配大小（TH13+ 导出时写成 total_len） | ✅ malloc 大小 |
+| 0x18 | `begin_len` | **循环点**（相对 begin_pos 的字节数） | ❌ **不读** |
+| 0x1C | `total_len` | 轨道总长度 | ✅ 算 DirectSound 缓冲大小 |
+
+含义：**TH12 是把整块音频读进内存后整块循环播放的**，`unknown` 一律大于
+`total_len`（1.03~1.29 倍）也印证了这点。所以循环点只能靠改音频实现 ——
+把音频拼成「引子 + 循环体 + 引子」，引擎整块循环时听感就成了
+「引子播一次，之后一直在循环点循环」。实现见
+[`../thtk/bgm.py`](../thtk/bgm.py) 的 `splice_loop_pcm`。
 
 ## 关于解包产物
 
