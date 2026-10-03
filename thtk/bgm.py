@@ -173,6 +173,10 @@ def parse_wav(data):
     """解析 WAV，返回 (pcm_bytes, sample_rate, channels, bits)。
 
     仅处理未压缩 PCM；其他格式抛 BgmError。
+
+    会严格校验每个 chunk 声明的长度没有超出文件实际大小。以前不校验，
+    截断的 WAV（下载中断、复制不全）会被**静默接受**并产出半截音频，
+    用户拿到一条长度不对的 BGM 却看不到任何提示。
     """
     if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
         raise BgmError("不是 WAV 文件")
@@ -182,6 +186,12 @@ def parse_wav(data):
     while pos + 8 <= len(data):
         cid = data[pos:pos + 4]
         csize = struct.unpack_from("<I", data, pos + 4)[0]
+        avail = len(data) - (pos + 8)
+        if csize > avail:
+            raise BgmError(
+                "WAV 文件不完整：%s 块声明 %d 字节，实际只剩 %d 字节"
+                "（文件可能没下载完或被截断）"
+                % (cid.decode("latin1", "replace"), csize, avail))
         body = data[pos + 8:pos + 8 + csize]
         if cid == b"fmt ":
             if len(body) < 16:
@@ -196,23 +206,31 @@ def parse_wav(data):
         raise BgmError("WAV 缺少 fmt/data 块")
     if fmt[0] != 1:
         raise BgmError("只支持未压缩 PCM WAV（当前格式 %d）" % fmt[0])
+    if not pcm:
+        raise BgmError("WAV 的 data 块是空的")
     return pcm, fmt[2], fmt[1], fmt[5]
 
 
 def convert_to_bgm_pcm(data):
-    """把任意 PCM WAV 转成 TH12 需要的 16bit/立体声/44100Hz PCM。"""
+    """把任意 PCM WAV 转成 TH12 需要的 16bit/立体声/44100Hz PCM。
+
+    转换顺序很关键：**先把声道数规整成 2，再做位深转换**。
+    反过来（先位深后声道）会错：`audioop.tostereo()` 是单声道语义的，
+    对已经是立体声的数据会按「单声道样本数」重新解释，帧数直接翻倍。
+    """
     import audioop
     pcm, rate, channels, bits = parse_wav(data)
+    if channels > 2:
+        # 多声道先下混成立体声（保持原位深，宽度对得上）
+        pcm = audioop.tomono(pcm, bits // 8, 0.5, 0.5)
+        pcm = audioop.tostereo(pcm, bits // 8, 1, 1)
+        channels = 2
+    elif channels == 1:
+        pcm = audioop.tostereo(pcm, bits // 8, 1, 1)
+        channels = 2
     if bits != 16:
         pcm = audioop.lin2lin(pcm, bits // 8, 2)
         bits = 16
-    if channels == 1:
-        pcm = audioop.tostereo(pcm, 2, 1, 1)
-        channels = 2
-    elif channels > 2:
-        pcm = audioop.tomono(pcm, 2, 0.5, 0.5)
-        pcm = audioop.tostereo(pcm, 2, 1, 1)
-        channels = 2
     if rate != SAMPLE_RATE:
         pcm, _ = audioop.ratecv(pcm, 2, channels, rate, SAMPLE_RATE, None)
     # 长度对齐到 4 字节

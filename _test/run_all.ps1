@@ -204,6 +204,10 @@ Invoke-PyTest "bgm-loop-diff-len" "verify_bgm_loop2.py"
 # point survives a save.
 Invoke-PyTest "bgm-loop-ondisk"   "verify_e2e_loop.py"
 Invoke-PyTest "bgm-replace+loop"  "verify_loop_combo.py"
+# Replacement must accept whatever WAV the user drags in (mono / 8-bit /
+# 24-bit / 48kHz ...) and must reject broken files instead of silently
+# writing half a track.
+Invoke-PyTest "bgm-replace-fmt"   "verify_replace_formats.py"
 # The loop point is implemented by splicing audio (the engine ignores the
 # thbgm.fmt loop field), so this one verifies the splice on real PCM.
 Invoke-PyTest "bgm-loop-splice"   "verify_loop_splice.py"
