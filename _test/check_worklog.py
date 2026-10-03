@@ -1,17 +1,23 @@
 # -*- coding: utf-8 -*-
-"""校验工作记录 Markdown 的基本结构是否完整。"""
+"""校验文档 Markdown 的基本结构是否完整（代码块配对、表格列数、相对链接）。
+
+默认校验 README.md；也可以把要检查的文件路径作为参数传进来。
+"""
 import io
 import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-DOC = os.path.join(ROOT, "改动总结-2026-10-03.md")
+DOC = os.path.join(ROOT, "README.md")
 
 FENCE = "`" * 3
 
 
 def main():
+    global DOC
+    if len(sys.argv) > 1:
+        DOC = sys.argv[1]
     if not os.path.isfile(DOC):
         print("找不到 %s" % DOC)
         return 1
